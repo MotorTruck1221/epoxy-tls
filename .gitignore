@@ -4,8 +4,6 @@ client/pkg
 client/out
 .direnv
 client/epoxy-bundled.js
-client/epoxy-module-bundled.js
-client/epoxy-module-bundled.d.ts
 client/epoxy.js
 client/epoxy.d.ts
 client/epoxy.wasm

@@ -32,6 +32,7 @@ hyper-util-wasm = { version = "0.1.3", features = ["client", "client-legacy", "h
 tokio = { version = "1.36.0", default-features = false }
 tower-service = "0.3.2"
 console_error_panic_hook = "0.1.7"
+doh-dns = { path = "../../doh-dns" }
 
 [dependencies.ring]
 features = ["wasm32_unknown_unknown_js"]

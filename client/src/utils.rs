@@ -77,7 +77,6 @@ impl<T> ReplaceErr for Option<T> {
 
 pub trait UriExt {
     fn get_redirect(&self, location: &HeaderValue) -> Result<Uri, JsError>;
-    fn is_same_host(&self, other: &Uri) -> bool;
 }
 
 impl UriExt for Uri {
@@ -92,9 +91,6 @@ impl UriExt for Uri {
         }
 
         Ok(Uri::from_parts(new_parts)?)
-    }
-    fn is_same_host(&self, other: &Uri) -> bool {
-        self.host() == other.host() && self.port() == other.port()
     }
 }
 

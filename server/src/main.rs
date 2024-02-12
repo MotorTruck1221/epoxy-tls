@@ -132,6 +132,7 @@ async fn handle_mux(
         "{}:{}",
         packet.destination_hostname, packet.destination_port
     );
+    println!("connecting to {:?}", uri);
     match packet.stream_type {
         StreamType::Tcp => {
             let mut tcp_stream = TcpStream::connect(uri)

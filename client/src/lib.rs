@@ -1,6 +1,7 @@
 #![feature(let_chains, impl_trait_in_assoc_type)]
 #[macro_use]
 mod utils;
+mod dns_client;
 mod tls_stream;
 mod websocket;
 mod wrappers;
@@ -56,7 +57,8 @@ fn init() {
 pub struct EpoxyClient {
     rustls_config: Arc<rustls::ClientConfig>,
     mux: Arc<ClientMux<SplitSink<WsStream, WsMessage>>>,
-    hyper_client: Client<TlsWispService<SplitSink<WsStream, WsMessage>>, HttpBody>,
+    hyper_client: Arc<Client<TlsWispService<SplitSink<WsStream, WsMessage>>, HttpBody>>,
+    dns_client: dns_client::EpxDnsClient,
     useragent: String,
     redirect_limit: usize,
 }
@@ -68,6 +70,7 @@ impl EpoxyClient {
         ws_url: String,
         useragent: String,
         redirect_limit: usize,
+        use_doh: Option<Vec<String>>,
     ) -> Result<EpoxyClient, JsError> {
         let ws_uri = ws_url
             .parse::<uri::Uri>()
@@ -104,16 +107,62 @@ impl EpoxyClient {
                 .with_no_client_auth(),
         );
 
+        let should_use_doh = use_doh.is_some();
+        let default_doh_servers = vec![
+            "https://1.1.1.1/dns-query".to_string(),
+            "https://1.0.0.1/dns-query".to_string(),
+            "https://dns.google/resolve".to_string(),
+        ];
+        let doh_servers = use_doh.unwrap_or_else(|| default_doh_servers.clone());
+        let doh_servers = if doh_servers.is_empty() {
+            default_doh_servers
+        } else {
+            doh_servers
+        };
+
+        let hyper_client = if should_use_doh {
+            let hyper_client_for_dns = Arc::new(
+                Client::builder(utils::WasmExecutor {})
+                    .http09_responses(true)
+                    .http1_title_case_headers(true)
+                    .http1_preserve_header_case(true)
+                    .build(TlsWispService {
+                        rustls_config: rustls_config.clone(),
+                        service: ServiceWrapper(mux.clone()),
+                        doh_client: None,
+                    }),
+            );
+            let dns_client =
+                dns_client::EpxDnsClient::new(hyper_client_for_dns, doh_servers.clone())?;
+            Arc::new(
+                Client::builder(utils::WasmExecutor {})
+                    .http09_responses(true)
+                    .http1_title_case_headers(true)
+                    .http1_preserve_header_case(true)
+                    .build(TlsWispService {
+                        rustls_config: rustls_config.clone(),
+                        service: ServiceWrapper(mux.clone()),
+                        doh_client: Some(dns_client.into()),
+                    }),
+            )
+        } else {
+            Arc::new(
+                Client::builder(utils::WasmExecutor {})
+                    .http09_responses(true)
+                    .http1_title_case_headers(true)
+                    .http1_preserve_header_case(true)
+                    .build(TlsWispService {
+                        rustls_config: rustls_config.clone(),
+                        service: ServiceWrapper(mux.clone()),
+                        doh_client: None,
+                    }),
+            )
+        };
+
         Ok(EpoxyClient {
-            mux: mux.clone(),
-            hyper_client: Client::builder(utils::WasmExecutor {})
-                .http09_responses(true)
-                .http1_title_case_headers(true)
-                .http1_preserve_header_case(true)
-                .build(TlsWispService {
-                    rustls_config: rustls_config.clone(),
-                    service: ServiceWrapper(mux),
-                }),
+            mux,
+            hyper_client: hyper_client.clone(),
+            dns_client: dns_client::EpxDnsClient::new(hyper_client, doh_servers)?,
             rustls_config,
             useragent,
             redirect_limit,
@@ -144,7 +193,7 @@ impl EpoxyClient {
         Ok(io)
     }
 
-    async fn send_req_inner(
+    async fn send_req(
         &self,
         req: http::Request<HttpBody>,
         should_redirect: bool,
@@ -155,13 +204,11 @@ impl EpoxyClient {
             None
         };
 
-        debug!("sending req");
         let res = self
             .hyper_client
             .request(req)
             .await
             .replace_err("Failed to send request");
-        debug!("recieved res");
         match res {
             Ok(res) => {
                 if utils::is_redirect(res.status().as_u16())
@@ -188,21 +235,21 @@ impl EpoxyClient {
         }
     }
 
-    async fn send_req(
+    async fn send_req_with_redirects(
         &self,
         req: http::Request<HttpBody>,
         should_redirect: bool,
     ) -> Result<(hyper::Response<Incoming>, Uri, bool), JsError> {
         let mut redirected = false;
         let mut current_url = req.uri().clone();
-        let mut current_resp: EpxResponse = self.send_req_inner(req, should_redirect).await?;
+        let mut current_resp: EpxResponse = self.send_req(req, should_redirect).await?;
         for _ in 0..self.redirect_limit - 1 {
             match current_resp {
                 EpxResponse::Success(_) => break,
                 EpxResponse::Redirect((_, req)) => {
                     redirected = true;
                     current_url = req.uri().clone();
-                    current_resp = self.send_req_inner(req, should_redirect).await?
+                    current_resp = self.send_req(req, should_redirect).await?
                 }
             }
         }
@@ -240,6 +287,13 @@ impl EpoxyClient {
         url: String,
     ) -> Result<EpxTlsStream, JsError> {
         EpxTlsStream::connect(self, onopen, onclose, onerror, onmessage, url).await
+    }
+
+    pub async fn resolve(&self, url: String) -> Result<String, JsError> {
+        self.dns_client
+            .resolve(&url)
+            .await
+            .replace_err("Failed to resolve")
     }
 
     pub async fn fetch(&self, url: String, options: Object) -> Result<web_sys::Response, JsError> {
@@ -301,8 +355,8 @@ impl EpoxyClient {
         let mut builder = Request::builder().uri(uri.clone()).method(req_method);
 
         let headers_map = builder.headers_mut().replace_err("Failed to get headers")?;
-        headers_map.insert("Accept-Encoding", HeaderValue::from_str("gzip, br")?);
-        headers_map.insert("Connection", HeaderValue::from_str("keep-alive")?);
+        headers_map.insert("Accept-Encoding", HeaderValue::from_static("gzip, br"));
+        headers_map.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers_map.insert("User-Agent", HeaderValue::from_str(&self.useragent)?);
         headers_map.insert("Host", HeaderValue::from_str(uri_host)?);
         if body_bytes.is_empty() {
@@ -324,7 +378,9 @@ impl EpoxyClient {
             .body(HttpBody::new(body_bytes))
             .replace_err("Failed to make request")?;
 
-        let (resp, resp_uri, req_redirected) = self.send_req(request, req_should_redirect).await?;
+        let (resp, resp_uri, req_redirected) = self
+            .send_req_with_redirects(request, req_should_redirect)
+            .await?;
 
         let resp_headers_raw = resp.headers().clone();
 
@@ -425,7 +481,8 @@ impl EpoxyClient {
         Object::define_property(
             &resp,
             &jval!("rawHeaders"),
-            &utils::define_property_obj(jval!(&raw_headers), false).replace_err("wjat!!")?,
+            &utils::define_property_obj(jval!(&raw_headers), false)
+                .replace_err("Failed to define rawHeaders")?,
         );
 
         Ok(resp)

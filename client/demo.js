@@ -1,7 +1,7 @@
 importScripts("epoxy-bundled.js");
 onmessage = async (msg) => {
     console.debug("recieved:", msg);
-    let [should_feature_test, should_multiparallel_test, should_parallel_test, should_multiperf_test, should_perf_test, should_ws_test, should_tls_test] = msg.data;
+    let [feature_test, multiparallel_test, parallel_test, multiperf_test, perf_test, ws_test, tls_test, dns_test] = msg.data;
     console.log(
         "%cWASM is significantly slower with DevTools open!",
         "color:red;font-size:3rem;font-weight:bold"
@@ -34,7 +34,7 @@ onmessage = async (msg) => {
         return t1 - t0;
     };
 
-    if (should_feature_test) {
+    if (feature_test) {
         for (const url of [
             ["https://httpbin.org/get", {}],
             ["https://httpbin.org/gzip", {}],
@@ -46,7 +46,7 @@ onmessage = async (msg) => {
             console.warn(url, resp, Object.fromEntries(resp.headers));
             console.warn(await resp.text());
         }
-    } else if (should_multiparallel_test) {
+    } else if (multiparallel_test) {
         const num_tests = 10;
         let total_mux_minus_native = 0;
         for (const _ of Array(num_tests).keys()) {
@@ -71,7 +71,7 @@ onmessage = async (msg) => {
         }
         total_mux_minus_native = total_mux_minus_native / num_tests;
         log(`total mux - native (${num_tests} tests of ${num_tests} reqs): ${total_mux_minus_native} ms or ${total_mux_minus_native / 1000} s`);
-    } else if (should_parallel_test) {
+    } else if (parallel_test) {
         const num_tests = 10;
 
         let total_mux = 0;
@@ -91,7 +91,7 @@ onmessage = async (msg) => {
         log(`avg mux (${num_tests}) took ${total_mux} ms or ${total_mux / 1000} s`);
         log(`avg native (${num_tests}) took ${total_native} ms or ${total_native / 1000} s`);
         log(`avg mux - avg native (${num_tests}): ${total_mux - total_native} ms or ${(total_mux - total_native) / 1000} s`);
-    } else if (should_multiperf_test) {
+    } else if (multiperf_test) {
         const num_tests = 10;
         let total_mux_minus_native = 0;
         for (const _ of Array(num_tests).keys()) {
@@ -116,7 +116,7 @@ onmessage = async (msg) => {
         }
         total_mux_minus_native = total_mux_minus_native / num_tests;
         log(`total mux - native (${num_tests} tests of ${num_tests} reqs): ${total_mux_minus_native} ms or ${total_mux_minus_native / 1000} s`);
-    } else if (should_perf_test) {
+    } else if (perf_test) {
         const num_tests = 10;
 
         let total_mux = 0;
@@ -136,7 +136,7 @@ onmessage = async (msg) => {
         log(`avg mux (${num_tests}) took ${total_mux} ms or ${total_mux / 1000} s`);
         log(`avg native (${num_tests}) took ${total_native} ms or ${total_native / 1000} s`);
         log(`avg mux - avg native (${num_tests}): ${total_mux - total_native} ms or ${(total_mux - total_native) / 1000} s`);
-    } else if (should_ws_test) {
+    } else if (ws_test) {
         let ws = await epoxy_client.connect_ws(
             () => console.log("opened"),
             () => console.log("closed"),
@@ -150,7 +150,7 @@ onmessage = async (msg) => {
             await ws.send("data");
             await (new Promise((res, _) => setTimeout(res, 100)));
         }
-    } else if (should_tls_test) {
+    } else if (tls_test) {
         let decoder = new TextDecoder();
         let ws = await epoxy_client.connect_tls(
             () => console.log("opened"),
@@ -161,6 +161,17 @@ onmessage = async (msg) => {
         );
         await ws.send("GET / HTTP 1.1\r\nHost: alicesworld.tech\r\nConnection: close\r\n\r\n");
         await ws.close();
+    } else if (dns_test) {
+        let total = 0;
+        for (const i of Array(100).keys()) {
+            const t0 = performance.now();
+            const res = await epoxy_client.resolve("coolelectronics.me");
+            const t1 = performance.now();
+            log(`resolving coolelectronics.me #${i} took ${t1 - t0}ms or ${(t1 - t0) / 1000}s, resolved to ${res}`);
+            total += t1 - t0;
+        }
+        total = total / 100;
+        log(`avg resolving coolelectronics.me took ${total}ms or ${total / 1000}s`);
     } else {
         let resp = await epoxy_client.fetch("https://httpbin.org/get");
         console.warn(resp, Object.fromEntries(resp.headers));

@@ -7,7 +7,7 @@ use futures::{
 };
 use std::sync::Arc;
 
-/// Wrapper struct that implements a Tower Service sfor a client multiplexor.
+/// Wrapper struct that implements a Tower Service for a client multiplexor.
 pub struct ServiceWrapper<W: WebSocketWrite + Send + 'static>(pub Arc<ClientMux<W>>);
 
 impl<W: WebSocketWrite + Send + 'static> tower_service::Service<hyper::Uri> for ServiceWrapper<W> {

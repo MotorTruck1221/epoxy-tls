@@ -49,8 +49,8 @@ where
 {
     pub service: ServiceWrapper<W>,
     pub rustls_config: Arc<rustls::ClientConfig>,
+    pub doh_client: Option<Arc<dns_client::EpxDnsClient>>,
 }
-
 
 impl<W: wisp_mux::ws::WebSocketWrite + Send + 'static> tower_service::Service<hyper::Uri>
     for TlsWispService<W>
@@ -66,6 +66,7 @@ impl<W: wisp_mux::ws::WebSocketWrite + Send + 'static> tower_service::Service<hy
     fn call(&mut self, req: http::Uri) -> Self::Future {
         let mut service = self.service.clone();
         let rustls_config = self.rustls_config.clone();
+        let doh_client = self.doh_client.clone();
         Box::pin(async move {
             let uri_host = req
                 .host()
@@ -75,7 +76,14 @@ impl<W: wisp_mux::ws::WebSocketWrite + Send + 'static> tower_service::Service<hy
             let uri_parsed = Uri::builder()
                 .authority(format!(
                     "{}:{}",
-                    uri_host,
+                    if let Some(doh_client) = doh_client {
+                        doh_client
+                            .resolve(&uri_host)
+                            .await
+                            .map_err(|x| WispError::Other(x.into()))?
+                    } else {
+                        uri_host.clone()
+                    },
                     utils::get_url_port(&req).map_err(|_| WispError::UriHasNoPort)?
                 ))
                 .build()
@@ -104,6 +112,7 @@ impl<W: wisp_mux::ws::WebSocketWrite + Send + 'static> Clone for TlsWispService<
         Self {
             rustls_config: self.rustls_config.clone(),
             service: self.service.clone(),
+            doh_client: self.doh_client.clone(),
         }
     }
 }
