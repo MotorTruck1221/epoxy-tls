@@ -2,15 +2,17 @@
 #[macro_use]
 mod utils;
 mod tls_stream;
+mod tokioio;
 mod udp_stream;
 mod websocket;
 mod wrappers;
 
 use tls_stream::EpxTlsStream;
+use tokioio::TokioIo;
 use udp_stream::EpxUdpStream;
 use utils::{Boolinator, ReplaceErr, UriExt};
 use websocket::EpxWebSocket;
-use wrappers::{IncomingBody, TlsWispService, WebSocketWrapper};
+use wrappers::{IncomingBody, ServiceWrapper, TlsWispService, WebSocketWrapper};
 
 use std::sync::Arc;
 
@@ -23,14 +25,14 @@ use hyper::{body::Incoming, Uri};
 use hyper_util_wasm::client::legacy::Client;
 use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use rustls::pki_types::TrustAnchor;
+use tokio::sync::RwLock;
 use tokio_rustls::{client::TlsStream, rustls, rustls::RootCertStore, TlsConnector};
 use tokio_util::{
     either::Either,
     io::{ReaderStream, StreamReader},
 };
 use wasm_bindgen::{intern, prelude::*};
-use web_sys::TextEncoder;
-use wisp_mux::{tokioio::TokioIo, tower::ServiceWrapper, ClientMux, MuxStreamIo, StreamType};
+use wisp_mux::{ClientMux, MuxStreamIo, StreamType};
 
 type HttpBody = http_body_util::Full<Bytes>;
 
@@ -55,6 +57,7 @@ fn init() {
     // utils.rs
     intern("value");
     intern("writable");
+    intern("POST");
 
     // main.rs
     intern("method");
@@ -64,6 +67,7 @@ fn init() {
     intern("url");
     intern("redirected");
     intern("rawHeaders");
+    intern("Content-Type");
 }
 
 fn cert_to_jval(cert: &TrustAnchor) -> Result<JsValue, JsValue> {
@@ -101,8 +105,8 @@ pub fn certs() -> Result<JsValue, JsValue> {
 #[wasm_bindgen(inspectable)]
 pub struct EpoxyClient {
     rustls_config: Arc<rustls::ClientConfig>,
-    mux: Arc<ClientMux<WebSocketWrapper>>,
-    hyper_client: Client<TlsWispService<WebSocketWrapper>, HttpBody>,
+    mux: Arc<RwLock<ClientMux<WebSocketWrapper>>>,
+    hyper_client: Client<TlsWispService, HttpBody>,
     #[wasm_bindgen(getter_with_clone)]
     pub useragent: String,
     #[wasm_bindgen(js_name = "redirectLimit")]
@@ -128,20 +132,9 @@ impl EpoxyClient {
             return Err(JsError::new("Scheme must be either `ws` or `wss`"));
         }
 
-        debug!("connecting to ws {:?}", ws_url);
-        let (wtx, wrx) = WebSocketWrapper::connect(ws_url, vec![])
-            .await
-            .replace_err("Failed to connect to websocket")?;
-        debug!("connected!");
-
-        let (mux, fut) = ClientMux::new(wrx, wtx).await?;
-        let mux = Arc::new(mux);
-
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(err) = fut.await {
-                error!("epoxy: error in mux future! {:?}", err);
-            }
-        });
+        let (mux, fut) = utils::make_mux(&ws_url).await?;
+        let mux = Arc::new(RwLock::new(mux));
+        utils::spawn_mux_fut(mux.clone(), fut, ws_url.clone());
 
         let mut certstore = RootCertStore::empty();
         certstore.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -160,7 +153,7 @@ impl EpoxyClient {
                 .http1_preserve_header_case(true)
                 .build(TlsWispService {
                     rustls_config: rustls_config.clone(),
-                    service: ServiceWrapper(mux),
+                    service: ServiceWrapper(mux, ws_url),
                 }),
             rustls_config,
             useragent,
@@ -171,6 +164,8 @@ impl EpoxyClient {
     async fn get_tls_io(&self, url_host: &str, url_port: u16) -> Result<EpxIoTlsStream, JsError> {
         let channel = self
             .mux
+            .read()
+            .await
             .client_new_stream(StreamType::Tcp, url_host.to_string(), url_port)
             .await
             .replace_err("Failed to create multiplexor channel")?
@@ -316,31 +311,24 @@ impl EpoxyClient {
             Err(_) => true,
         };
 
+        let mut body_content_type: Option<String> = None;
         let body_jsvalue: Option<JsValue> = Reflect::get(&options, &jval!("body")).ok();
-        let body = if let Some(val) = body_jsvalue {
-            if val.is_string() {
-                let str = val
-                    .as_string()
-                    .replace_err("Failed to get string from body")?;
-                let encoder =
-                    TextEncoder::new().replace_err("Failed to create TextEncoder for body")?;
-                let encoded = encoder.encode_with_input(str.as_ref());
-                Some(encoded)
-            } else {
-                Some(Uint8Array::new(&val).to_vec())
+        let body_bytes: Bytes = match body_jsvalue {
+            Some(buf) => {
+                let (body, req) = utils::jval_to_u8_array_req(buf)
+                    .await
+                    .replace_err("Invalid body")?;
+                body_content_type = req.headers().get("Content-Type").ok().flatten();
+                Bytes::from(body.to_vec())
             }
-        } else {
-            None
-        };
-
-        let body_bytes: Bytes = match body {
-            Some(vec) => Bytes::from(vec),
             None => Bytes::new(),
         };
 
         let headers = Reflect::get(&options, &jval!("headers"))
             .map(|val| {
-                if val.is_truthy() {
+                if web_sys::Headers::instanceof(&val) {
+                    Some(utils::entries_of_object(&Object::from_entries(&val).ok()?))
+                } else if val.is_truthy() {
                     Some(utils::entries_of_object(&Object::from(val)))
                 } else {
                     None
@@ -357,6 +345,9 @@ impl EpoxyClient {
         headers_map.insert("Host", HeaderValue::from_str(uri_host)?);
         if body_bytes.is_empty() {
             headers_map.insert("Content-Length", HeaderValue::from_static("0"));
+        }
+        if let Some(content_type) = body_content_type {
+            headers_map.insert("Content-Type", HeaderValue::from_str(&content_type)?);
         }
 
         if let Some(headers) = headers {

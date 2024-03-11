@@ -11,7 +11,6 @@ use hyper::{
     upgrade::Upgraded,
     StatusCode,
 };
-use js_sys::Function;
 use std::str::from_utf8;
 use tokio::io::WriteHalf;
 
@@ -106,7 +105,8 @@ impl EpxWebSocket {
                             let _ = onclose.call0(&JsValue::null());
                             break;
                         }
-                        _ => panic!("unknown opcode {:?}", frame.opcode),
+                        // ping/pong/continue
+                        _ => {},
                     }
                 }
             });
@@ -127,7 +127,7 @@ impl EpxWebSocket {
     }
 
     #[wasm_bindgen]
-    pub async fn send(&self, payload: String) -> Result<(), JsError> {
+    pub async fn send_text(&self, payload: String) -> Result<(), JsError> {
         let onerr = self.onerror.clone();
         let ret = self
             .tx
@@ -136,7 +136,24 @@ impl EpxWebSocket {
             .write_frame(Frame::text(Payload::Owned(payload.as_bytes().to_vec())))
             .await;
         if let Err(ret) = ret {
-            let _ = onerr.call1(&JsValue::null(), &jval!(format!("{}", ret)));
+            let _ = onerr.call1(&JsValue::null(), &jval!(ret.to_string()));
+            Err(ret.into())
+        } else {
+            Ok(ret?)
+        }
+    }
+
+    #[wasm_bindgen]
+    pub async fn send_binary(&self, payload: Uint8Array) -> Result<(), JsError> {
+        let onerr = self.onerror.clone();
+        let ret = self
+            .tx
+            .lock()
+            .await
+            .write_frame(Frame::binary(Payload::Owned(payload.to_vec())))
+            .await;
+        if let Err(ret) = ret {
+            let _ = onerr.call1(&JsValue::null(), &jval!(ret.to_string()));
             Err(ret.into())
         } else {
             Ok(ret?)

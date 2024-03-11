@@ -1,9 +1,12 @@
+use crate::*;
+
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 
 use hyper::rt::Executor;
-use hyper::{header::HeaderValue, Uri};
-use js_sys::{Array, Object};
+use js_sys::ArrayBuffer;
 use std::future::Future;
+use wisp_mux::{CloseReason, WispError};
 
 #[wasm_bindgen]
 extern "C" {
@@ -185,4 +188,79 @@ pub fn get_url_port(url: &Uri) -> Result<u16, JsError> {
     } else {
         Ok(80)
     }
+}
+
+pub async fn make_mux(
+    url: &str,
+) -> Result<
+    (
+        ClientMux<WebSocketWrapper>,
+        impl Future<Output = Result<(), WispError>>,
+    ),
+    WispError,
+> {
+    let (wtx, wrx) = WebSocketWrapper::connect(url, vec![])
+        .await
+        .map_err(|_| WispError::WsImplSocketClosed)?;
+    wtx.wait_for_open().await;
+    let mux = ClientMux::new(wrx, wtx).await?;
+
+    Ok(mux)
+}
+
+pub fn spawn_mux_fut(
+    mux: Arc<RwLock<ClientMux<WebSocketWrapper>>>,
+    fut: impl Future<Output = Result<(), WispError>> + 'static,
+    url: String,
+) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = fut.await {
+            error!("epoxy: error in mux future, restarting: {:?}", e);
+            while let Err(e) = replace_mux(mux.clone(), &url).await {
+                error!("epoxy: failed to restart mux future: {:?}", e);
+                wasmtimer::tokio::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        debug!("epoxy: mux future exited");
+    });
+}
+
+pub async fn replace_mux(
+    mux: Arc<RwLock<ClientMux<WebSocketWrapper>>>,
+    url: &str,
+) -> Result<(), WispError> {
+    let (mux_replace, fut) = make_mux(url).await?;
+    let mut mux_write = mux.write().await;
+    mux_write.close(CloseReason::Unknown).await;
+    *mux_write = mux_replace;
+    drop(mux_write);
+    spawn_mux_fut(mux, fut, url.into());
+    Ok(())
+}
+
+pub async fn jval_to_u8_array(val: JsValue) -> Result<Uint8Array, JsValue> {
+    JsFuture::from(
+        web_sys::Request::new_with_str_and_init(
+            "/",
+            web_sys::RequestInit::new().method("POST").body(Some(&val)),
+        )?
+        .array_buffer()?,
+    )
+    .await?
+    .dyn_into::<ArrayBuffer>()
+    .map(|x| Uint8Array::new(&x))
+}
+
+pub async fn jval_to_u8_array_req(val: JsValue) -> Result<(Uint8Array, web_sys::Request), JsValue> {
+    let req = web_sys::Request::new_with_str_and_init(
+        "/",
+        web_sys::RequestInit::new().method("POST").body(Some(&val)),
+    )?;
+    Ok((
+        JsFuture::from(req.array_buffer()?)
+            .await?
+            .dyn_into::<ArrayBuffer>()
+            .map(|x| Uint8Array::new(&x))?,
+        req,
+    ))
 }

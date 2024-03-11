@@ -1,7 +1,6 @@
 use crate::*;
 
 use futures_util::{stream::SplitSink, SinkExt};
-use js_sys::Function;
 
 #[wasm_bindgen(inspectable)]
 pub struct EpxUdpStream {
@@ -34,6 +33,8 @@ impl EpxUdpStream {
 
             let io = tcp
                 .mux
+                .read()
+                .await
                 .client_new_stream(StreamType::Udp, url_host.to_string(), url_port)
                 .await
                 .replace_err("Failed to open multiplexor channel")?
@@ -70,9 +71,17 @@ impl EpxUdpStream {
     }
 
     #[wasm_bindgen]
-    pub async fn send(&mut self, payload: Uint8Array) -> Result<(), JsError> {
+    pub async fn send(&mut self, payload: JsValue) -> Result<(), JsError> {
         let onerr = self.onerror.clone();
-        let ret = self.tx.send(payload.to_vec()).await;
+        let ret = self
+            .tx
+            .send(
+                utils::jval_to_u8_array(payload)
+                    .await
+                    .replace_err("Invalid payload")?
+                    .to_vec(),
+            )
+            .await;
         if let Err(ret) = ret {
             let _ = onerr.call1(&JsValue::null(), &jval!(format!("{}", ret)));
             Err(ret.into())

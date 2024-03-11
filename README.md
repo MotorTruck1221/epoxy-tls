@@ -1,5 +1,5 @@
 # epoxy
-Epoxy is an encrypted proxy for browser javascript. It allows you to make requests that bypass cors without compromising security, by running SSL/TLS inside webassembly.
+Epoxy is an encrypted proxy for browser javascript. It allows you to make requests that bypass CORS without compromising security, by running SSL/TLS inside webassembly.
 
 ## Using the client
 Epoxy must be run from within a web worker and must be served with the [security headers needed for `SharedArrayBuffer`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements). Here is a simple usage example:
@@ -29,15 +29,20 @@ See `client/demo.js` for more examples.
 $ cargo r -r --bin epoxy-server -- --help
 Implementation of the Wisp protocol in Rust, made for epoxy.
 
-Usage: epoxy-server [OPTIONS] --pubkey <PUBKEY> --privkey <PRIVKEY>
+Usage: epoxy-server [OPTIONS]
 
 Options:
-      --prefix <PREFIX>    [default: ]
-  -l, --port <PORT>        [default: 4000]
-  -p, --pubkey <PUBKEY>    
-  -P, --privkey <PRIVKEY>  
-  -h, --help               Print help
-  -V, --version            Print version
+      --prefix <PREFIX>  [default: ]
+  -p, --port <PORT>      [default: 4000]
+  -b, --host <HOST>      [default: 0.0.0.0]
+  -u, --unix-socket      
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+You can listen on a unix socket by passing the `--unix-socket` flag and the unix socket path in the `--host` flag. Example:
+```
+cargo r -r -- -u -b "/home/user/epoxy-socket"
 ```
 
 ## Building

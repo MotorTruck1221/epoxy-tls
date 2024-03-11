@@ -10,7 +10,8 @@ onmessage = async (msg) => {
         should_perf_test,
         should_ws_test,
         should_tls_test,
-        should_udp_test
+        should_udp_test,
+        should_reconnect_test,
     ] = msg.data;
     console.log(
         "%cWASM is significantly slower with DevTools open!",
@@ -57,16 +58,24 @@ onmessage = async (msg) => {
     };
 
     if (should_feature_test) {
+        let formdata = new FormData();
+        formdata.append("a", "b");
         for (const url of [
             ["https://httpbin.org/get", {}],
             ["https://httpbin.org/gzip", {}],
             ["https://httpbin.org/brotli", {}],
             ["https://httpbin.org/redirect/11", {}],
             ["https://httpbin.org/redirect/1", { redirect: "manual" }],
+            ["https://httpbin.org/post", { method: "POST", body: new URLSearchParams("a=b") }],
+            ["https://httpbin.org/post", { method: "POST", body: formdata }],
+            ["https://httpbin.org/post", { method: "POST", body: "a" }],
+            ["https://httpbin.org/post", { method: "POST", body: (new TextEncoder()).encode("abc") }],
+            ["https://httpbin.org/get", { headers: {"a": "b", "b": "c"} }],
+            ["https://httpbin.org/get", { headers: new Headers({"a": "b", "b": "c"}) }]
         ]) {
             let resp = await epoxy_client.fetch(url[0], url[1]);
             console.warn(url, resp, Object.fromEntries(resp.headers));
-            console.warn(await resp.text());
+            log(await resp.text());
         }
     } else if (should_multiparallel_test) {
         const num_tests = 10;
@@ -170,7 +179,7 @@ onmessage = async (msg) => {
         );
         while (true) {
             log("sending `data`");
-            await ws.send("data");
+            await ws.send_text("data");
             await (new Promise((res, _) => setTimeout(res, 50)));
         }
     } else if (should_tls_test) {
@@ -180,14 +189,14 @@ onmessage = async (msg) => {
             () => log("closed"),
             err => console.error(err),
             msg => { console.log(msg); log(decoder.decode(msg)) },
-            "alicesworld.tech:443",
+            "google.com:443",
         );
-        await ws.send("GET / HTTP 1.1\r\nHost: alicesworld.tech\r\nConnection: close\r\n\r\n");
+        await ws.send("GET / HTTP 1.1\r\nHost: google.com\r\nConnection: close\r\n\r\n");
         await (new Promise((res, _) => setTimeout(res, 500)));
         await ws.close();
     } else if (should_udp_test) {
         let decoder = new TextDecoder();
-        // nc -ulp 5000
+        // tokio example: `cargo r --example echo-udp -- 127.0.0.1:5000`
         let ws = await epoxy_client.connect_udp(
             () => log("opened"),
             () => log("closed"),
@@ -195,8 +204,19 @@ onmessage = async (msg) => {
             msg => { console.log(msg); log(decoder.decode(msg)) },
             "127.0.0.1:5000",
         );
-        await (new Promise((res, _) => setTimeout(res, 5000)));
-        await ws.close();
+        while (true) {
+            log("sending `data`");
+            await ws.send("data");
+            await (new Promise((res, _) => setTimeout(res, 50)));
+        }
+    } else if (should_reconnect_test) {
+        while (true) {
+            try {
+                await epoxy_client.fetch("https://httpbin.org/get");
+            } catch(e) {console.error(e)}
+            log("sent req");
+            await (new Promise((res, _) => setTimeout(res, 500)));
+        }
     } else {
         let resp = await epoxy_client.fetch("https://httpbin.org/get");
         console.log(resp, Object.fromEntries(resp.headers));
