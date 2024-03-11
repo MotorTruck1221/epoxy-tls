@@ -1,0 +1,7 @@
+version: '3'
+
+services:
+  wisp-server-rust:
+    build: .
+    image: wisp-server-rust
+    restart: unless-stopped
