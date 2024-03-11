@@ -7,4 +7,4 @@ RUN cargo b -r --bin epoxy-server
 
 EXPOSE 4000
 
-CMD ["./target/release/epoxy-server", "--help"]
+CMD ["./target/release/epoxy-server", "start"]
