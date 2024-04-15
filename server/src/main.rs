@@ -4,12 +4,13 @@ use std::io::Error;
 use bytes::Bytes;
 use clap::Parser;
 use fastwebsockets::{
-    upgrade, CloseCode, FragmentCollector, FragmentCollectorRead, Frame, OpCode, Payload,
+    upgrade::{self, UpgradeFut}, CloseCode, FragmentCollector, FragmentCollectorRead, Frame, OpCode, Payload,
     WebSocketError,
 };
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
 use hyper::{
-    body::Incoming, server::conn::http1, service::service_fn, Request, Response, StatusCode,
+    body::Incoming, server::conn::http1, service::service_fn, Request, Response,
+    StatusCode,
 };
 use hyper_util::rt::TokioIo;
 use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
@@ -28,16 +29,15 @@ type HttpBody = http_body_util::Full<hyper::body::Bytes>;
 #[command(version = clap::crate_version!())]
 struct Cli {
     /// URL prefix the server should serve on
-    #[arg(long, default_value = "")]
-    prefix: String,
+    #[arg(long)]
+    prefix: Option<String>,
     /// Port the server should bind to
     #[arg(long, short, default_value = "4000")]
     port: String,
     /// Host the server should bind to
     #[arg(long = "host", short, value_name = "HOST", default_value = "0.0.0.0")]
     bind_host: String,
-    /// Whether the server should listen on a Unix socket located at the value of the bind_host
-    /// argument
+    /// Whether the server should listen on a Unix socket located at the value of the host argument
     #[arg(long, short)]
     unix_socket: bool,
     /// Whether the server should block IP addresses that are not globally reachable
@@ -46,6 +46,14 @@ struct Cli {
     /// addresses are blocked
     #[arg(long, short = 'B')]
     block_local: bool,
+    /// Whether the server should block UDP
+    ///
+    /// This does nothing for wsproxy as that is always TCP
+    #[arg(long)]
+    block_udp: bool,
+    /// Whether the server should block ports other than 80 or 443
+    #[arg(long)]
+    block_non_http: bool,
 }
 
 #[cfg(not(unix))]
@@ -117,16 +125,33 @@ async fn main() -> Result<(), Error> {
 
     let socket = bind(&addr, opt.unix_socket).await?;
 
-    println!("listening on `{}`", addr);
+    let prefix = if let Some(prefix) = opt.prefix {
+        match (prefix.starts_with('/'), prefix.ends_with('/')) {
+            (true, true) => prefix,
+            (true, false) => prefix + "/",
+            (false, true) => "/".to_string() + &prefix,
+            (false, false) => "/".to_string() + &prefix + "/",
+        }
+    } else {
+        "/".to_string()
+    };
+
+    println!("listening on `{}` with prefix `{}`", addr, prefix);
     while let Ok((stream, addr)) = socket.accept().await {
-        let prefix = opt.prefix.clone();
+        let prefix = prefix.clone();
         tokio::spawn(async move {
-            let io = TokioIo::new(stream);
             let service = service_fn(move |res| {
-                accept_http(res, addr.clone(), prefix.clone(), opt.block_local)
+                accept_http(
+                    res,
+                    addr.clone(),
+                    prefix.clone(),
+                    opt.block_local,
+                    opt.block_udp,
+                    opt.block_non_http,
+                )
             });
             let conn = http1::Builder::new()
-                .serve_connection(io, service)
+                .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades();
             if let Err(err) = conn.await {
                 println!("failed to serve conn: {:?}", err);
@@ -142,6 +167,8 @@ async fn accept_http(
     addr: String,
     prefix: String,
     block_local: bool,
+    block_udp: bool,
+    block_non_http: bool,
 ) -> Result<Response<HttpBody>, WebSocketError> {
     let uri = req.uri().path().to_string();
     if upgrade::is_upgrade_request(&req)
@@ -149,10 +176,14 @@ async fn accept_http(
     {
         let (res, fut) = upgrade::upgrade(&mut req)?;
 
-        if uri == "/" {
-            tokio::spawn(async move { accept_ws(fut, addr.clone(), block_local).await });
+        if uri.is_empty() {
+            tokio::spawn(async move {
+                accept_ws(fut, addr.clone(), block_local, block_udp, block_non_http).await
+            });
         } else if let Some(uri) = uri.strip_prefix('/').map(|x| x.to_string()) {
-            tokio::spawn(async move { accept_wsproxy(fut, uri, addr.clone(), block_local).await });
+            tokio::spawn(async move {
+                accept_wsproxy(fut, uri, addr.clone(), block_local, block_non_http).await
+            });
         }
 
         Ok(Response::from_parts(
@@ -184,7 +215,11 @@ async fn handle_mux(packet: ConnectPacket, mut stream: MuxStream) -> Result<bool
                 .map_err(|x| WispError::Other(Box::new(x)))?;
         }
         StreamType::Udp => {
-            let uri = lookup_host(uri).await.map_err(|x| WispError::Other(Box::new(x)))?.next().ok_or(WispError::InvalidUri)?;
+            let uri = lookup_host(uri)
+                .await
+                .map_err(|x| WispError::Other(Box::new(x)))?
+                .next()
+                .ok_or(WispError::InvalidUri)?;
             let udp_socket = UdpSocket::bind(if uri.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
                 .await
                 .map_err(|x| WispError::Other(Box::new(x)))?;
@@ -215,16 +250,18 @@ async fn handle_mux(packet: ConnectPacket, mut stream: MuxStream) -> Result<bool
 }
 
 async fn accept_ws(
-    fut: upgrade::UpgradeFut,
+    ws: UpgradeFut,
     addr: String,
     block_local: bool,
+    block_non_http: bool,
+    block_udp: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
-    let (rx, tx) = fut.await?.split(tokio::io::split);
+    let (rx, tx) = ws.await?.split(tokio::io::split);
     let rx = FragmentCollectorRead::new(rx);
 
     println!("{:?}: connected", addr);
 
-    let (mut mux, fut) = ServerMux::new(rx, tx, 128);
+    let (mut mux, fut) = ServerMux::new(rx, tx, u32::MAX);
 
     tokio::spawn(async move {
         if let Err(e) = fut.await {
@@ -232,8 +269,15 @@ async fn accept_ws(
         }
     });
 
-    while let Some((packet, stream)) = mux.server_new_stream().await {
+    while let Some((packet, mut stream)) = mux.server_new_stream().await {
         tokio::spawn(async move {
+            if (block_non_http
+                && !(packet.destination_port == 80 || packet.destination_port == 443))
+                || (block_udp && packet.stream_type == StreamType::Udp)
+            {
+                let _ = stream.close(CloseReason::ServerStreamBlockedAddress).await;
+                return;
+            }
             if block_local {
                 match lookup_host(format!(
                     "{}:{}",
@@ -257,8 +301,8 @@ async fn accept_ws(
                     }
                 }
             }
-            let close_err = stream.get_close_handle();
-            let close_ok = stream.get_close_handle();
+            let mut close_err = stream.get_close_handle();
+            let mut close_ok = stream.get_close_handle();
             let _ = handle_mux(packet, stream)
                 .or_else(|err| async move {
                     let _ = close_err.close(CloseReason::Unexpected).await;
@@ -280,39 +324,42 @@ async fn accept_ws(
 }
 
 async fn accept_wsproxy(
-    fut: upgrade::UpgradeFut,
+    ws: UpgradeFut,
     incoming_uri: String,
     addr: String,
     block_local: bool,
+    block_non_http: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
-    let mut ws_stream = FragmentCollector::new(fut.await?);
+    let mut ws_stream = FragmentCollector::new(ws.await?);
 
     println!("{:?}: connected (wsproxy): {:?}", addr, incoming_uri);
 
-    if block_local {
-        match lookup_host(&incoming_uri)
-            .await
-            .ok()
-            .and_then(|mut x| x.next())
-            .map(|x| !x.ip().is_global())
-        {
-            Some(true) => {
-                ws_stream
-                    .write_frame(Frame::close(CloseCode::Error.into(), b"blocked uri"))
-                    .await?;
-                return Ok(());
-            }
-            Some(false) => {}
-            None => {
-                ws_stream
-                    .write_frame(Frame::close(
-                        CloseCode::Error.into(),
-                        b"failed to resolve uri",
-                    ))
-                    .await?;
-                return Ok(());
-            }
-        }
+    let Some(host) = lookup_host(&incoming_uri)
+        .await
+        .ok()
+        .and_then(|mut x| x.next())
+    else {
+        ws_stream
+            .write_frame(Frame::close(
+                CloseCode::Error.into(),
+                b"failed to resolve uri",
+            ))
+            .await?;
+        return Ok(());
+    };
+
+    if block_local && !host.ip().is_global() {
+        ws_stream
+            .write_frame(Frame::close(CloseCode::Error.into(), b"blocked uri"))
+            .await?;
+        return Ok(());
+    }
+
+    if block_non_http && !(host.port() == 80 || host.port() == 443) {
+        ws_stream
+            .write_frame(Frame::close(CloseCode::Error.into(), b"blocked uri"))
+            .await?;
+        return Ok(());
     }
 
     let tcp_stream = match TcpStream::connect(incoming_uri).await {

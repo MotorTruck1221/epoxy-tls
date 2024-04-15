@@ -1,33 +1,45 @@
+use atomic_counter::{AtomicCounter, RelaxedCounter};
 use bytes::Bytes;
+use clap::Parser;
 use fastwebsockets::{handshake, FragmentCollectorRead};
-use futures::io::AsyncWriteExt;
+use futures::future::select_all;
 use http_body_util::Empty;
+use humantime::format_duration;
 use hyper::{
     header::{CONNECTION, UPGRADE},
-    Request,
+    Request, Uri,
 };
-use std::{error::Error, future::Future};
-use tokio::net::TcpStream;
+use simple_moving_average::{SingleSumSMA, SMA};
+use std::{
+    error::Error, future::Future, io::{stdout, IsTerminal, Write}, net::SocketAddr, process::exit, sync::Arc, time::{Duration, Instant}, usize
+};
+use tokio::{
+    net::TcpStream,
+    select,
+    signal::unix::{signal, SignalKind},
+    time::{interval, sleep},
+};
 use tokio_native_tls::{native_tls, TlsConnector};
-use wisp_mux::{ClientMux, StreamType};
 use tokio_util::either::Either;
+use wisp_mux::{ClientMux, StreamType, WispError};
 
 #[derive(Debug)]
-struct StrError(String);
-
-impl StrError {
-    pub fn new(str: &str) -> Self {
-        Self(str.to_string())
-    }
+enum WispClientError {
+    InvalidUriScheme,
+    UriHasNoHost,
 }
 
-impl std::fmt::Display for StrError {
+impl std::fmt::Display for WispClientError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        write!(fmt, "{}", self.0)
+        use WispClientError as E;
+        match self {
+            E::InvalidUriScheme => write!(fmt, "Invalid URI scheme"),
+            E::UriHasNoHost => write!(fmt, "URI has no host"),
+        }
     }
 }
 
-impl Error for StrError {}
+impl Error for WispClientError {}
 
 struct SpawnExecutor;
 
@@ -41,47 +53,63 @@ where
     }
 }
 
+#[derive(Parser)]
+#[command(version = clap::crate_version!())]
+struct Cli {
+    /// Wisp server URL
+    #[arg(short, long)]
+    wisp: Uri,
+    /// TCP server address
+    #[arg(short, long)]
+    tcp: SocketAddr,
+    /// Number of streams
+    #[arg(short, long, default_value_t = 10)]
+    streams: usize,
+    /// Size of packets sent, in KB
+    #[arg(short, long, default_value_t = 1)]
+    packet_size: usize,
+    /// Duration to run the test for
+    #[arg(short, long)]
+    duration: Option<humantime::Duration>,
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     #[cfg(feature = "tokio-console")]
     console_subscriber::init();
-    let addr = std::env::args()
-        .nth(1)
-        .ok_or(StrError::new("no src addr"))?;
+    let opts = Cli::parse();
 
-    let addr_port: u16 = std::env::args()
-        .nth(2)
-        .ok_or(StrError::new("no src port"))?
-        .parse()?;
+    let tls = match opts
+        .wisp
+        .scheme_str()
+        .ok_or(WispClientError::InvalidUriScheme)?
+    {
+        "wss" => Ok(true),
+        "ws" => Ok(false),
+        _ => Err(WispClientError::InvalidUriScheme),
+    }?;
+    let addr = opts.wisp.host().ok_or(WispClientError::UriHasNoHost)?;
+    let addr_port = opts.wisp.port_u16().unwrap_or(if tls { 443 } else { 80 });
+    let addr_path = opts.wisp.path();
+    let addr_dest = opts.tcp.ip().to_string();
+    let addr_dest_port = opts.tcp.port();
 
-    let addr_path = std::env::args()
-        .nth(3)
-        .ok_or(StrError::new("no src path"))?;
-
-    let addr_dest = std::env::args()
-        .nth(4)
-        .ok_or(StrError::new("no dest addr"))?;
-
-    let addr_dest_port: u16 = std::env::args()
-        .nth(5)
-        .ok_or(StrError::new("no dest port"))?
-        .parse()?;
-    let should_tls: bool = std::env::args()
-        .nth(6)
-        .ok_or(StrError::new("no should tls"))?
-        .parse()?;
+    println!(
+        "connecting to {} and sending &[0; 1024 * {}] to {} with threads {}",
+        opts.wisp, opts.packet_size, opts.tcp, opts.streams,
+    );
 
     let socket = TcpStream::connect(format!("{}:{}", &addr, addr_port)).await?;
-    let socket = if should_tls {
+    let socket = if tls {
         let cx = TlsConnector::from(native_tls::TlsConnector::builder().build()?);
-        Either::Left(cx.connect(&addr, socket).await?)
+        Either::Left(cx.connect(addr, socket).await?)
     } else {
         Either::Right(socket)
     };
     let req = Request::builder()
         .method("GET")
         .uri(addr_path)
-        .header("Host", &addr)
+        .header("Host", addr)
         .header(UPGRADE, "websocket")
         .header(CONNECTION, "upgrade")
         .header(
@@ -98,23 +126,105 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let rx = FragmentCollectorRead::new(rx);
 
     let (mux, fut) = ClientMux::new(rx, tx).await?;
+    let mut threads = Vec::with_capacity(opts.streams * 2 + 3);
 
-    tokio::task::spawn(async move { println!("err: {:?}", fut.await); });
+    threads.push(tokio::spawn(fut));
 
-    let mut hi: u64 = 0;
-    loop {
-        let mut channel = mux
+    let payload = Bytes::from(vec![0; 1024 * opts.packet_size]);
+
+    let cnt = Arc::new(RelaxedCounter::new(0));
+
+    let start_time = Instant::now();
+    for _ in 0..opts.streams {
+        let (mut cr, mut cw) = mux
             .client_new_stream(StreamType::Tcp, addr_dest.clone(), addr_dest_port)
             .await?
-            .into_io()
-            .into_asyncrw();
-        for _ in 0..256 {
-            channel.write_all(b"hiiiiiiii").await?;
-            hi += 1;
-            println!("said hi {}", hi);
-        }
+            .into_split();
+        let cnt = cnt.clone();
+        let payload = payload.clone();
+        threads.push(tokio::spawn(async move {
+            loop {
+                cw.write(payload.clone()).await?;
+                cnt.inc();
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), WispError>(())
+        }));
+        threads.push(tokio::spawn(async move {
+            loop {
+                cr.read().await;
+            }
+        }));
     }
 
-    #[allow(unreachable_code)]
+    let cnt_avg = cnt.clone();
+    threads.push(tokio::spawn(async move {
+        let mut interval = interval(Duration::from_millis(100));
+        let mut avg: SingleSumSMA<usize, usize, 100> = SingleSumSMA::new();
+        let mut last_time = 0;
+        let is_term = stdout().is_terminal();
+        loop {
+            interval.tick().await;
+            let now = cnt_avg.get();
+            let stat = format!(
+                "sent &[0; 1024 * {}] cnt: {:?} ({} KiB), +{:?} ({} KiB / 100ms), moving average (10 s): {:?} ({} KiB / 10 s)",
+                opts.packet_size,
+                now,
+                now * opts.packet_size,
+                now - last_time,
+                (now - last_time) * opts.packet_size,
+                avg.get_average(),
+                avg.get_average() * opts.packet_size,
+            );
+            if is_term {
+                print!("\x1b[2K{}\r", stat);
+            } else {
+                println!("{}", stat);
+            }
+            stdout().flush().unwrap();
+            avg.add_sample(now - last_time);
+            last_time = now;
+        }
+    }));
+
+    threads.push(tokio::spawn(async move {
+        let mut interrupt =
+            signal(SignalKind::interrupt()).map_err(|x| WispError::Other(Box::new(x)))?;
+        let mut terminate =
+            signal(SignalKind::terminate()).map_err(|x| WispError::Other(Box::new(x)))?;
+        select! {
+            _ = interrupt.recv() => (),
+            _ = terminate.recv() => (),
+        }
+        Ok(())
+    }));
+
+    if let Some(duration) = opts.duration {
+        threads.push(tokio::spawn(async move {
+            sleep(duration.into()).await;
+            Ok(())
+        }));
+    }
+
+    let out = select_all(threads.into_iter()).await;
+
+    if let Err(err) = out.0? {
+        println!("\n\nerr: {:?}", err);
+        exit(1);
+    }
+
+    out.2.into_iter().for_each(|x| x.abort());
+
+    let duration_since = Instant::now().duration_since(start_time);
+
+    println!(
+        "\n\nresults: {} packets of &[0; 1024 * {}] ({} KiB) sent in {} ({} KiB/s)",
+        cnt.get(),
+        opts.packet_size,
+        cnt.get() * opts.packet_size,
+        format_duration(duration_since),
+        (cnt.get() * opts.packet_size) as u64 / duration_since.as_secs(),
+    );
+
     Ok(())
 }
