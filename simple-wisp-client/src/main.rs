@@ -11,7 +11,13 @@ use hyper::{
 };
 use simple_moving_average::{SingleSumSMA, SMA};
 use std::{
-    error::Error, future::Future, io::{stdout, IsTerminal, Write}, net::SocketAddr, process::exit, sync::Arc, time::{Duration, Instant}, usize
+    error::Error,
+    future::Future,
+    io::{stdout, IsTerminal, Write},
+    net::SocketAddr,
+    process::exit,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpStream,
@@ -21,7 +27,14 @@ use tokio::{
 };
 use tokio_native_tls::{native_tls, TlsConnector};
 use tokio_util::either::Either;
-use wisp_mux::{ClientMux, StreamType, WispError};
+use wisp_mux::{
+    extensions::{
+        password::{PasswordProtocolExtension, PasswordProtocolExtensionBuilder},
+        udp::{UdpProtocolExtension, UdpProtocolExtensionBuilder},
+        ProtocolExtensionBuilder,
+    },
+    ClientMux, StreamType, WispError,
+};
 
 #[derive(Debug)]
 enum WispClientError {
@@ -71,6 +84,17 @@ struct Cli {
     /// Duration to run the test for
     #[arg(short, long)]
     duration: Option<humantime::Duration>,
+    /// Ask for UDP
+    #[arg(short, long)]
+    udp: bool,
+    /// Enable auth: format is `username:password`
+    ///
+    /// Usernames and passwords are sent in plaintext!!
+    #[arg(long)]
+    auth: Option<String>,
+    /// Make a Wisp V1 connection
+    #[arg(long)]
+    wisp_v1: bool,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -93,6 +117,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let addr_path = opts.wisp.path();
     let addr_dest = opts.tcp.ip().to_string();
     let addr_dest_port = opts.tcp.port();
+
+    let auth = opts.auth.map(|auth| {
+        let split: Vec<_> = auth.split(':').collect();
+        let username = split[0].to_string();
+        let password = split[1..].join(":");
+        PasswordProtocolExtensionBuilder::new_client(username, password)
+    });
 
     println!(
         "connecting to {} and sending &[0; 1024 * {}] to {} with threads {}",
@@ -117,7 +148,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             fastwebsockets::handshake::generate_key(),
         )
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Protocol", "wisp-v1")
         .body(Empty::<Bytes>::new())?;
 
     let (ws, _) = handshake::client(&SpawnExecutor, req, socket).await?;
@@ -125,8 +155,34 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (rx, tx) = ws.split(tokio::io::split);
     let rx = FragmentCollectorRead::new(rx);
 
-    let (mux, fut) = ClientMux::new(rx, tx).await?;
-    let mut threads = Vec::with_capacity(opts.streams * 2 + 3);
+    let mut extensions: Vec<Box<(dyn ProtocolExtensionBuilder + Send + Sync)>> = Vec::new();
+    let mut extension_ids: Vec<u8> = Vec::new();
+    if opts.udp {
+        extensions.push(Box::new(UdpProtocolExtensionBuilder()));
+        extension_ids.push(UdpProtocolExtension::ID);
+    }
+    if let Some(auth) = auth {
+        extensions.push(Box::new(auth));
+        extension_ids.push(PasswordProtocolExtension::ID);
+    }
+
+    let (mux, fut) = if opts.wisp_v1 {
+        ClientMux::create(rx, tx, None)
+            .await?
+            .with_no_required_extensions()
+    } else {
+        ClientMux::create(rx, tx, Some(extensions.as_slice()))
+            .await?
+            .with_required_extensions(extension_ids.as_slice()).await?
+    };
+
+    println!(
+        "connected and created ClientMux, was downgraded {}, extensions supported {:?}",
+        mux.downgraded, mux.supported_extension_ids
+    );
+
+    let mut threads = Vec::with_capacity(opts.streams + 4);
+    let mut reads = Vec::with_capacity(opts.streams);
 
     threads.push(tokio::spawn(fut));
 
@@ -136,7 +192,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let start_time = Instant::now();
     for _ in 0..opts.streams {
-        let (mut cr, mut cw) = mux
+        let (cr, cw) = mux
             .client_new_stream(StreamType::Tcp, addr_dest.clone(), addr_dest_port)
             .await?
             .into_split();
@@ -150,12 +206,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             #[allow(unreachable_code)]
             Ok::<(), WispError>(())
         }));
-        threads.push(tokio::spawn(async move {
-            loop {
-                cr.read().await;
-            }
-        }));
+        reads.push(cr);
     }
+
+    threads.push(tokio::spawn(async move {
+        loop {
+            select_all(reads.iter().map(|x| Box::pin(x.read()))).await;
+        }
+    }));
 
     let cnt_avg = cnt.clone();
     threads.push(tokio::spawn(async move {
@@ -167,17 +225,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             interval.tick().await;
             let now = cnt_avg.get();
             let stat = format!(
-                "sent &[0; 1024 * {}] cnt: {:?} ({} KiB), +{:?} ({} KiB / 100ms), moving average (10 s): {:?} ({} KiB / 10 s)",
+                "sent &[0; 1024 * {}] cnt: {:?} ({} KiB), +{:?} / 100ms ({} KiB / 1s), moving average (10 s): {:?} / 100ms ({} KiB / 1s)",
                 opts.packet_size,
                 now,
                 now * opts.packet_size,
                 now - last_time,
-                (now - last_time) * opts.packet_size,
+                (now - last_time) * opts.packet_size * 10,
                 avg.get_average(),
-                avg.get_average() * opts.packet_size,
+                avg.get_average() * opts.packet_size * 10,
             );
             if is_term {
-                print!("\x1b[2K{}\r", stat);
+                println!("\x1b[1A\x1b[2K{}\r", stat);
             } else {
                 println!("{}", stat);
             }
@@ -208,6 +266,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let out = select_all(threads.into_iter()).await;
 
+    let duration_since = Instant::now().duration_since(start_time);
+
     if let Err(err) = out.0? {
         println!("\n\nerr: {:?}", err);
         exit(1);
@@ -215,16 +275,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     out.2.into_iter().for_each(|x| x.abort());
 
-    let duration_since = Instant::now().duration_since(start_time);
+    mux.close().await?;
 
-    println!(
-        "\n\nresults: {} packets of &[0; 1024 * {}] ({} KiB) sent in {} ({} KiB/s)",
-        cnt.get(),
-        opts.packet_size,
-        cnt.get() * opts.packet_size,
-        format_duration(duration_since),
-        (cnt.get() * opts.packet_size) as u64 / duration_since.as_secs(),
-    );
+    if duration_since.as_secs() != 0 {
+        println!(
+            "\nresults: {} packets of &[0; 1024 * {}] ({} KiB) sent in {} ({} KiB/s)",
+            cnt.get(),
+            opts.packet_size,
+            cnt.get() * opts.packet_size,
+            format_duration(duration_since),
+            (cnt.get() * opts.packet_size) as u64 / duration_since.as_secs(),
+        );
+    }
 
     Ok(())
 }

@@ -1,117 +1,25 @@
-use crate::*;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use wasm_bindgen::prelude::*;
+use bytes::Bytes;
+use futures_util::{Future, Stream};
+use http::{HeaderValue, Uri};
+use hyper::{body::Body, rt::Executor};
+use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
+use pin_project_lite::pin_project;
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use hyper::rt::Executor;
-use js_sys::ArrayBuffer;
-use std::future::Future;
-use wisp_mux::WispError;
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console, js_name = debug)]
-    pub fn console_debug(s: &str);
-    #[wasm_bindgen(js_namespace = console, js_name = log)]
-    pub fn console_log(s: &str);
-    #[wasm_bindgen(js_namespace = console, js_name = error)]
-    pub fn console_error(s: &str);
-}
-
-macro_rules! debug {
-    ($($t:tt)*) => (utils::console_debug(&format_args!($($t)*).to_string()))
-}
-
-macro_rules! log {
-    ($($t:tt)*) => (utils::console_log(&format_args!($($t)*).to_string()))
-}
-
-#[allow(unused_macros)]
-macro_rules! error {
-    ($($t:tt)*) => (utils::console_error(&format_args!($($t)*).to_string()))
-}
-
-macro_rules! jerr {
-    ($expr:expr) => {
-        JsError::new($expr)
-    };
-}
-
-macro_rules! jval {
-    ($expr:expr) => {
-        JsValue::from($expr)
-    };
-}
-
-pub trait ReplaceErr {
-    type Ok;
-
-    fn replace_err(self, err: &str) -> Result<Self::Ok, JsError>;
-    fn replace_err_jv(self, err: &str) -> Result<Self::Ok, JsValue>;
-}
-
-impl<T, E: std::fmt::Debug> ReplaceErr for Result<T, E> {
-    type Ok = T;
-
-    fn replace_err(self, err: &str) -> Result<<Self as ReplaceErr>::Ok, JsError> {
-        self.map_err(|x| jerr!(&format!("{}, original error: {:?}", err, x)))
-    }
-
-    fn replace_err_jv(self, err: &str) -> Result<<Self as ReplaceErr>::Ok, JsValue> {
-        self.map_err(|x| jval!(&format!("{}, original error: {:?}", err, x)))
-    }
-}
-
-impl<T> ReplaceErr for Option<T> {
-    type Ok = T;
-
-    fn replace_err(self, err: &str) -> Result<<Self as ReplaceErr>::Ok, JsError> {
-        self.ok_or_else(|| jerr!(err))
-    }
-
-    fn replace_err_jv(self, err: &str) -> Result<<Self as ReplaceErr>::Ok, JsValue> {
-        self.ok_or_else(|| jval!(err))
-    }
-}
-
-// the... BOOLINATOR!
-impl ReplaceErr for bool {
-    type Ok = ();
-
-    fn replace_err(self, err: &str) -> Result<(), JsError> {
-        if !self {
-            Err(jerr!(err))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn replace_err_jv(self, err: &str) -> Result<(), JsValue> {
-        if !self {
-            Err(jval!(err))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-// the... BOOLINATOR!
-pub trait Boolinator {
-    fn flatten(self, err: &str) -> Result<(), JsError>;
-}
-
-impl Boolinator for Result<bool, JsValue> {
-    fn flatten(self, err: &str) -> Result<(), JsError> {
-        self.replace_err(err)?.replace_err(err)
-    }
-}
+use crate::EpoxyError;
 
 pub trait UriExt {
-    fn get_redirect(&self, location: &HeaderValue) -> Result<Uri, JsError>;
+    fn get_redirect(&self, location: &HeaderValue) -> Result<Uri, EpoxyError>;
 }
 
 impl UriExt for Uri {
-    fn get_redirect(&self, location: &HeaderValue) -> Result<Uri, JsError> {
+    fn get_redirect(&self, location: &HeaderValue) -> Result<Uri, EpoxyError> {
         let new_uri = location.to_str()?.parse::<hyper::Uri>()?;
         let mut new_parts: http::uri::Parts = new_uri.into();
         if new_parts.scheme.is_none() {
@@ -140,8 +48,75 @@ where
     }
 }
 
+pin_project! {
+    pub struct IncomingBody {
+        #[pin]
+        incoming: hyper::body::Incoming,
+    }
+}
+
+impl IncomingBody {
+    pub fn new(incoming: hyper::body::Incoming) -> IncomingBody {
+        IncomingBody { incoming }
+    }
+}
+
+impl Stream for IncomingBody {
+    type Item = std::io::Result<Bytes>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let ret = this.incoming.poll_frame(cx);
+        match ret {
+            Poll::Ready(item) => Poll::<Option<Self::Item>>::Ready(match item {
+                Some(frame) => frame
+                    .map(|x| {
+                        x.into_data()
+                            .map_err(|_| std::io::Error::other("not data frame"))
+                    })
+                    .ok(),
+                None => None,
+            }),
+            Poll::Pending => Poll::<Option<Self::Item>>::Pending,
+        }
+    }
+}
+
+pub fn is_redirect(code: u16) -> bool {
+    [301, 302, 303, 307, 308].contains(&code)
+}
+
+pub fn is_null_body(code: u16) -> bool {
+    [101, 204, 205, 304].contains(&code)
+}
+
+pub fn object_get(obj: &Object, key: &str) -> Option<JsValue> {
+    Reflect::get(obj, &key.into()).ok()
+}
+
+pub fn object_set(obj: &Object, key: &JsValue, value: &JsValue) -> Result<(), EpoxyError> {
+    if Reflect::set(obj, key, value).map_err(|_| EpoxyError::RawHeaderSetFailed)? {
+        Ok(())
+    } else {
+        Err(EpoxyError::RawHeaderSetFailed)
+    }
+}
+
+pub async fn convert_body(val: JsValue) -> Result<(Uint8Array, web_sys::Request), JsValue> {
+    let req = web_sys::Request::new_with_str_and_init(
+        "/",
+        web_sys::RequestInit::new().method("POST").body(Some(&val)),
+    )?;
+    Ok((
+        JsFuture::from(req.array_buffer()?)
+            .await?
+            .dyn_into::<ArrayBuffer>()
+            .map(|x| Uint8Array::new(&x))?,
+        req,
+    ))
+}
+
 pub fn entries_of_object(obj: &Object) -> Vec<Vec<String>> {
-    js_sys::Object::entries(obj)
+    Object::entries(obj)
         .to_vec()
         .iter()
         .filter_map(|val| {
@@ -156,111 +131,10 @@ pub fn entries_of_object(obj: &Object) -> Vec<Vec<String>> {
 
 pub fn define_property_obj(value: JsValue, writable: bool) -> Result<Object, JsValue> {
     let entries: Array = [
-        Array::of2(&jval!("value"), &value),
-        Array::of2(&jval!("writable"), &jval!(writable)),
+        Array::of2(&"value".into(), &value),
+        Array::of2(&"writable".into(), &writable.into()),
     ]
     .iter()
     .collect::<Array>();
     Object::from_entries(&entries)
-}
-
-pub fn is_redirect(code: u16) -> bool {
-    [301, 302, 303, 307, 308].contains(&code)
-}
-
-pub fn is_null_body(code: u16) -> bool {
-    [101, 204, 205, 304].contains(&code)
-}
-
-pub fn get_is_secure(url: &Uri) -> Result<bool, JsError> {
-    let url_scheme_str = url.scheme_str().replace_err("URL must have a scheme")?;
-    match url_scheme_str {
-        "https" | "wss" => Ok(true),
-        _ => Ok(false),
-    }
-}
-
-pub fn get_url_port(url: &Uri) -> Result<u16, JsError> {
-    if let Some(port) = url.port() {
-        Ok(port.as_u16())
-    } else if get_is_secure(url)? {
-        Ok(443)
-    } else {
-        Ok(80)
-    }
-}
-
-pub async fn make_mux(
-    url: &str,
-) -> Result<
-    (
-        ClientMux<WebSocketWrapper>,
-        impl Future<Output = Result<(), WispError>>,
-    ),
-    WispError,
-> {
-    let (wtx, wrx) = WebSocketWrapper::connect(url, vec![])
-        .await
-        .map_err(|_| WispError::WsImplSocketClosed)?;
-    wtx.wait_for_open().await;
-    let mux = ClientMux::new(wrx, wtx).await?;
-
-    Ok(mux)
-}
-
-pub fn spawn_mux_fut(
-    mux: Arc<RwLock<ClientMux<WebSocketWrapper>>>,
-    fut: impl Future<Output = Result<(), WispError>> + 'static,
-    url: String,
-) {
-    wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = fut.await {
-            log!("epoxy: error in mux future, restarting: {:?}", e);
-            while let Err(e) = replace_mux(mux.clone(), &url).await {
-                log!("epoxy: failed to restart mux future: {:?}", e);
-                wasmtimer::tokio::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-        debug!("epoxy: mux future exited");
-    });
-}
-
-pub async fn replace_mux(
-    mux: Arc<RwLock<ClientMux<WebSocketWrapper>>>,
-    url: &str,
-) -> Result<(), WispError> {
-    let (mux_replace, fut) = make_mux(url).await?;
-    let mut mux_write = mux.write().await;
-    mux_write.close().await?;
-    *mux_write = mux_replace;
-    drop(mux_write);
-    spawn_mux_fut(mux, fut, url.into());
-    Ok(())
-}
-
-pub async fn jval_to_u8_array(val: JsValue) -> Result<Uint8Array, JsValue> {
-    JsFuture::from(
-        web_sys::Request::new_with_str_and_init(
-            "/",
-            web_sys::RequestInit::new().method("POST").body(Some(&val)),
-        )?
-        .array_buffer()?,
-    )
-    .await?
-    .dyn_into::<ArrayBuffer>()
-    .map(|x| Uint8Array::new(&x))
-}
-
-pub async fn jval_to_u8_array_req(val: JsValue) -> Result<(Uint8Array, web_sys::Request), JsValue> {
-    let req = web_sys::Request::new_with_str_and_init(
-        "/",
-        web_sys::RequestInit::new().method("POST").body(Some(&val)),
-    )?;
-    Ok((
-        JsFuture::from(req.array_buffer()?)
-            .await?
-            .dyn_into::<ArrayBuffer>()
-            .map(|x| Uint8Array::new(&x))?,
-        req,
-    ))
 }
