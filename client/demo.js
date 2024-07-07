@@ -184,6 +184,7 @@ onmessage = async (msg) => {
 			handlers,
 			"wss://echo.websocket.events",
 			[],
+			{ "x-header": "abc" },
 		);
 		while (true) {
 			log("sending `data`");
