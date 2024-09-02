@@ -1,20 +1,18 @@
-import epoxy from "./pkg/epoxy-module-bundled.js";
-import CERTS from "./pkg/certs-module.js";
+import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epoxyInfo } from "./pkg/epoxy-bundled.js";
 
-onmessage = async (msg) => {
-	console.debug("recieved demo:", msg);
-	let [
-		should_feature_test,
-		should_multiparallel_test,
-		should_parallel_test,
-		should_multiperf_test,
-		should_perf_test,
-		should_ws_test,
-		should_tls_test,
-		should_udp_test,
-		should_reconnect_test,
-		should_perf2_test,
-	] = msg.data;
+(async () => {
+	const params = (new URL(location.href)).searchParams;
+	const should_feature_test = params.has("feature_test");
+	const should_multiparallel_test = params.has("multi_parallel_test");
+	const should_parallel_test = params.has("parallel_test");
+	const should_multiperf_test = params.has("multi_perf_test");
+	const should_perf_test = params.has("perf_test");
+	const should_ws_test = params.has("ws_test");
+	const should_tls_test = params.has("rawtls_test");
+	const should_udp_test = params.has("udp_test");
+	const should_reconnect_test = params.has("reconnect_test");
+	const should_perf2_test = params.has("perf2_test");
+	const should_wisptransport = params.has("wisptransport");
 	console.log(
 		"%cWASM is significantly slower with DevTools open!",
 		"color:red;font-size:3rem;font-weight:bold"
@@ -22,22 +20,28 @@ onmessage = async (msg) => {
 
 	const log = (str) => {
 		console.log(str);
-		postMessage(str);
+		let el = document.createElement("pre");
+		el.textContent = str;
+		document.getElementById("logs").appendChild(el);
+		window.scrollTo(0, document.body.scrollHeight);
 	}
 
-	const plog = (str) => {
-		console.log(str);
-		postMessage(JSON.stringify(str, null, 4));
-	}
-
-	const { EpoxyClient, EpoxyClientOptions, EpoxyHandlers } = await epoxy();
-
-	console.log("certs:", CERTS);
-
+	await initEpoxy();
 	let epoxy_client_options = new EpoxyClientOptions();
 	epoxy_client_options.user_agent = navigator.userAgent;
 
-	let epoxy_client = new EpoxyClient("ws://localhost:4000", CERTS, epoxy_client_options);
+	let epoxy_client;
+
+	if (should_wisptransport) {
+		log("using wisptransport with websocketstream backend");
+		epoxy_client = new EpoxyClient(async () => {
+			let wss = new WebSocketStream("ws://localhost:4000/");
+			let {readable, writable} = await wss.opened;
+			return {read: readable, write: writable};
+		}, epoxy_client_options);
+	} else {
+		epoxy_client = new EpoxyClient("ws://localhost:4000/", epoxy_client_options);
+	}
 
 	const tconn0 = performance.now();
 	await epoxy_client.replace_stream_provider();
@@ -48,6 +52,7 @@ onmessage = async (msg) => {
 	console.log(epoxy_client);
 	// you can change the user agent and redirect limit in JS
 	epoxy_client.redirect_limit = 15;
+	console.log(epoxyInfo);
 
 	const test_mux = async (url) => {
 		const t0 = performance.now();
@@ -63,10 +68,20 @@ onmessage = async (msg) => {
 		return t1 - t0;
 	};
 
+	const readableStream = (buffer) => {
+		return new ReadableStream({
+			start(controller) {
+				controller.enqueue(buffer);
+				controller.close();
+			}
+		});
+	};
+
 	if (should_feature_test) {
 		let formdata = new FormData();
 		formdata.append("a", "b");
 		for (const url of [
+			["https://httpbin.org/post", { method: "POST", body: readableStream((new TextEncoder()).encode("abc")) }],
 			["https://httpbin.org/get", {}],
 			["https://httpbin.org/gzip", {}],
 			["https://httpbin.org/brotli", {}],
@@ -186,9 +201,11 @@ onmessage = async (msg) => {
 			[],
 			{ "x-header": "abc" },
 		);
+		let i = 0;
 		while (true) {
-			log("sending `data`");
-			await ws.send("data");
+			log(`sending \`data${i}\``);
+			await ws.send("data" + i);
+			i++;
 			await (new Promise((res, _) => setTimeout(res, 10)));
 		}
 	} else if (should_tls_test) {
@@ -222,7 +239,7 @@ onmessage = async (msg) => {
 		while (true) {
 			log("sending `data`");
 			await ws.send("data");
-			await (new Promise((res, _) => setTimeout(res, 10)));
+			await (new Promise((res, _) => setTimeout(res, 100)));
 		}
 	} else if (should_reconnect_test) {
 		while (true) {
@@ -249,11 +266,12 @@ onmessage = async (msg) => {
 		}
 		total_mux_multi = total_mux_multi / num_outer_tests;
 		log(`total avg mux (${num_outer_tests} tests of ${num_inner_tests} reqs): ${total_mux_multi} ms or ${total_mux_multi / 1000} s`);
-
 	} else {
+		console.time();
 		let resp = await epoxy_client.fetch("https://www.example.com/");
+		console.timeEnd();
 		console.log(resp, Object.fromEntries(resp.headers));
 		log(await resp.text());
 	}
 	log("done");
-};
+})();

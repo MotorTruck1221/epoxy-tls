@@ -1,262 +1,288 @@
-use std::{pin::Pin, sync::Arc, task::Poll};
+use std::{
+	io::{ErrorKind},
+	pin::Pin,
+	sync::Arc,
+	task::Poll,
+};
 
+use cfg_if::cfg_if;
 use futures_rustls::{
-    rustls::{ClientConfig, RootCertStore},
-    TlsConnector, TlsStream,
+	rustls::{ClientConfig, RootCertStore},
+	TlsConnector,
 };
 use futures_util::{
-    future::Either,
-    lock::{Mutex, MutexGuard},
-    AsyncRead, AsyncWrite, Future,
+	future::Either,
+	lock::{Mutex, MutexGuard},
+	AsyncRead, AsyncWrite, Future,
 };
-use hyper_util_wasm::client::legacy::connect::{Connected, Connection};
-use js_sys::{Array, Reflect, Uint8Array};
+use hyper_util_wasm::client::legacy::connect::{ConnectSvc, Connected, Connection};
 use pin_project_lite::pin_project;
-use rustls_pki_types::{Der, TrustAnchor};
-use tower_service::Service;
-use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
+use webpki_roots::TLS_SERVER_ROOTS;
 use wisp_mux::{
-    extensions::{udp::UdpProtocolExtensionBuilder, ProtocolExtensionBuilder}, ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType
+	extensions::{udp::UdpProtocolExtensionBuilder, ProtocolExtensionBuilder},
+	ws::{WebSocketRead, WebSocketWrite},
+	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType,
 };
 
-use crate::{ws_wrapper::WebSocketWrapper, EpoxyClientOptions, EpoxyError};
-
-fn object_to_trustanchor(obj: JsValue) -> Result<TrustAnchor<'static>, JsValue> {
-    let subject: Uint8Array = Reflect::get(&obj, &"subject".into())?.dyn_into()?;
-    let pub_key_info: Uint8Array =
-        Reflect::get(&obj, &"subject_public_key_info".into())?.dyn_into()?;
-    let name_constraints: Option<Uint8Array> = Reflect::get(&obj, &"name_constraints".into())
-        .and_then(|x| x.dyn_into())
-        .ok();
-    Ok(TrustAnchor {
-        subject: Der::from(subject.to_vec()),
-        subject_public_key_info: Der::from(pub_key_info.to_vec()),
-        name_constraints: name_constraints.map(|x| Der::from(x.to_vec())),
-    })
-}
-
-pub struct StreamProvider {
-    wisp_url: String,
-
-    wisp_v2: bool,
-    udp_extension: bool,
-    websocket_protocols: Vec<String>,
-
-    client_config: Arc<ClientConfig>,
-
-    current_client: Arc<Mutex<Option<ClientMux>>>,
-}
+use crate::{console_log, utils::IgnoreCloseNotify, EpoxyClientOptions, EpoxyError};
 
 pub type ProviderUnencryptedStream = MuxStreamIo;
 pub type ProviderUnencryptedAsyncRW = MuxStreamAsyncRW;
-pub type ProviderTlsAsyncRW = TlsStream<ProviderUnencryptedAsyncRW>;
+pub type ProviderTlsAsyncRW = IgnoreCloseNotify;
 pub type ProviderAsyncRW = Either<ProviderTlsAsyncRW, ProviderUnencryptedAsyncRW>;
+pub type ProviderWispTransportGenerator = Box<
+	dyn Fn() -> Pin<
+			Box<
+				dyn Future<
+						Output = Result<
+							(
+								Box<dyn WebSocketRead + Send>,
+								Box<dyn WebSocketWrite + Send>,
+							),
+							EpoxyError,
+						>,
+					> + Sync
+					+ Send,
+			>,
+		> + Sync
+		+ Send,
+>;
+
+pub struct StreamProvider {
+	wisp_generator: ProviderWispTransportGenerator,
+
+	wisp_v2: bool,
+	udp_extension: bool,
+
+	current_client: Arc<Mutex<Option<ClientMux>>>,
+
+	client_config: Arc<ClientConfig>,
+}
 
 impl StreamProvider {
-    pub fn new(
-        wisp_url: String,
-        certs: Array,
-        options: &EpoxyClientOptions,
-    ) -> Result<Self, EpoxyError> {
-        let certs: Result<Vec<TrustAnchor>, JsValue> =
-            certs.iter().map(object_to_trustanchor).collect();
-        let certstore = RootCertStore::from_iter(certs.map_err(|_| EpoxyError::InvalidCertStore)?);
-        let client_config = Arc::new(
-            ClientConfig::builder()
-                .with_root_certificates(certstore)
-                .with_no_client_auth(),
-        );
+	pub fn new(
+		wisp_generator: ProviderWispTransportGenerator,
+		options: &EpoxyClientOptions,
+	) -> Result<Self, EpoxyError> {
+		cfg_if! {
+			if #[cfg(feature = "full")] {
+				let pems: Result<Result<Vec<_>, webpki::Error>, std::io::Error> = options
+					.pem_files
+					.iter()
+					.flat_map(|x| {
+						rustls_pemfile::certs(&mut std::io::BufReader::new(x.as_bytes()))
+							.map(|x| x.map(|x| webpki::anchor_from_trusted_cert(&x).map(|x| x.to_owned())))
+							.collect::<Vec<_>>()
+					})
+					.collect();
+				let pems = pems.map_err(EpoxyError::Pemfile)??;
+				let certstore = RootCertStore::from_iter(pems.into_iter().chain(TLS_SERVER_ROOTS.iter().cloned()));
+			} else {
+				let certstore = RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned());
+			}
+		}
 
-        Ok(Self {
-            wisp_url,
-            current_client: Arc::new(Mutex::new(None)),
-            wisp_v2: options.wisp_v2,
-            udp_extension: options.udp_extension_required,
-            websocket_protocols: options.websocket_protocols.clone(),
-            client_config,
-        })
-    }
+		let client_config = ClientConfig::builder()
+			.with_root_certificates(certstore)
+			.with_no_client_auth();
+		let client_config = Arc::new(client_config);
 
-    async fn create_client(
-        &self,
-        mut locked: MutexGuard<'_, Option<ClientMux>>,
-    ) -> Result<(), EpoxyError> {
-        let extensions_vec: Vec<Box<dyn ProtocolExtensionBuilder + Send + Sync>> =
-            vec![Box::new(UdpProtocolExtensionBuilder())];
-        let extensions = if self.wisp_v2 {
-            Some(extensions_vec.as_slice())
-        } else {
-            None
-        };
-        let (write, read) = WebSocketWrapper::connect(&self.wisp_url, &self.websocket_protocols)?;
-        if !write.wait_for_open().await {
-            return Err(EpoxyError::WebSocketConnectFailed);
-        }
-        let client = ClientMux::create(read, write, extensions).await?;
-        let (mux, fut) = if self.udp_extension {
-            client.with_udp_extension_required().await?
-        } else {
-            client.with_no_required_extensions()
-        };
-        locked.replace(mux);
-        let current_client = self.current_client.clone();
-        spawn_local(async move {
-            fut.await;
-            current_client.lock().await.take();
-        });
-        Ok(())
-    }
+		Ok(Self {
+			wisp_generator,
+			current_client: Arc::new(Mutex::new(None)),
+			wisp_v2: options.wisp_v2,
+			udp_extension: options.udp_extension_required,
+			client_config,
+		})
+	}
 
-    pub async fn replace_client(&self) -> Result<(), EpoxyError> {
-        self.create_client(self.current_client.lock().await).await
-    }
+	async fn create_client(
+		&self,
+		mut locked: MutexGuard<'_, Option<ClientMux>>,
+	) -> Result<(), EpoxyError> {
+		let extensions_vec: Vec<Box<dyn ProtocolExtensionBuilder + Send + Sync>> =
+			vec![Box::new(UdpProtocolExtensionBuilder)];
+		let extensions = if self.wisp_v2 {
+			Some(extensions_vec.as_slice())
+		} else {
+			None
+		};
 
-    pub async fn get_stream(
-        &self,
-        stream_type: StreamType,
-        host: String,
-        port: u16,
-    ) -> Result<ProviderUnencryptedStream, EpoxyError> {
-        Box::pin(async {
-            let locked = self.current_client.lock().await;
-            if let Some(mux) = locked.as_ref() {
-                Ok(mux
-                    .client_new_stream(stream_type, host, port)
-                    .await?
-                    .into_io())
-            } else {
-                self.create_client(locked).await?;
-                self.get_stream(stream_type, host, port).await
-            }
-        })
-        .await
-    }
+		let (read, write) = (self.wisp_generator)().await?;
 
-    pub async fn get_asyncread(
-        &self,
-        stream_type: StreamType,
-        host: String,
-        port: u16,
-    ) -> Result<ProviderUnencryptedAsyncRW, EpoxyError> {
-        Ok(self
-            .get_stream(stream_type, host, port)
-            .await?
-            .into_asyncrw())
-    }
+		let client = ClientMux::create(read, write, extensions).await?;
+		let (mux, fut) = if self.udp_extension {
+			client.with_udp_extension_required().await?
+		} else {
+			client.with_no_required_extensions()
+		};
+		locked.replace(mux);
+		let current_client = self.current_client.clone();
+		spawn_local(async move {
+			console_log!("multiplexor future result: {:?}", fut.await);
+			current_client.lock().await.take();
+		});
+		Ok(())
+	}
 
-    pub async fn get_tls_stream(
-        &self,
-        host: String,
-        port: u16,
-    ) -> Result<ProviderTlsAsyncRW, EpoxyError> {
-        let stream = self
-            .get_asyncread(StreamType::Tcp, host.clone(), port)
-            .await?;
-        let connector = TlsConnector::from(self.client_config.clone());
-        Ok(connector.connect(host.try_into()?, stream).await?.into())
-    }
+	pub async fn replace_client(&self) -> Result<(), EpoxyError> {
+		self.create_client(self.current_client.lock().await).await
+	}
+
+	pub async fn get_stream(
+		&self,
+		stream_type: StreamType,
+		host: String,
+		port: u16,
+	) -> Result<ProviderUnencryptedStream, EpoxyError> {
+		Box::pin(async {
+			let locked = self.current_client.lock().await;
+			if let Some(mux) = locked.as_ref() {
+				let stream = mux.client_new_stream(stream_type, host, port).await?;
+				Ok(stream.into_io())
+			} else {
+				self.create_client(locked).await?;
+				self.get_stream(stream_type, host, port).await
+			}
+		})
+		.await
+	}
+
+	pub async fn get_asyncread(
+		&self,
+		stream_type: StreamType,
+		host: String,
+		port: u16,
+	) -> Result<ProviderUnencryptedAsyncRW, EpoxyError> {
+		Ok(self
+			.get_stream(stream_type, host, port)
+			.await?
+			.into_asyncrw())
+	}
+
+	pub async fn get_tls_stream(
+		&self,
+		host: String,
+		port: u16,
+	) -> Result<ProviderTlsAsyncRW, EpoxyError> {
+		let stream = self
+			.get_asyncread(StreamType::Tcp, host.clone(), port)
+			.await?;
+		let connector = TlsConnector::from(self.client_config.clone());
+		let ret = connector
+			.connect(host.try_into()?, stream)
+			.into_fallible()
+			.await;
+		match ret {
+			Ok(stream) => Ok(IgnoreCloseNotify {
+				inner: stream.into(),
+			}),
+			Err((err, stream)) => {
+				if matches!(err.kind(), ErrorKind::UnexpectedEof) {
+					// maybe actually a wisp error?
+					if let Some(reason) = stream.get_close_reason() {
+						return Err(reason.into());
+					}
+				}
+				Err(err.into())
+			}
+		}
+	}
 }
 
 pin_project! {
-    pub struct HyperIo {
-        #[pin]
-        inner: ProviderAsyncRW,
-    }
+	pub struct HyperIo {
+		#[pin]
+		inner: ProviderAsyncRW,
+	}
 }
 
 impl hyper::rt::Read for HyperIo {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        mut buf: hyper::rt::ReadBufCursor<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        let buf_slice: &mut [u8] = unsafe { std::mem::transmute(buf.as_mut()) };
-        match self.project().inner.poll_read(cx, buf_slice) {
-            Poll::Ready(bytes_read) => {
-                let bytes_read = bytes_read?;
-                unsafe {
-                    buf.advance(bytes_read);
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
+	fn poll_read(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+		mut buf: hyper::rt::ReadBufCursor<'_>,
+	) -> Poll<Result<(), std::io::Error>> {
+		let buf_slice: &mut [u8] = unsafe { std::mem::transmute(buf.as_mut()) };
+		match self.project().inner.poll_read(cx, buf_slice) {
+			Poll::Ready(bytes_read) => {
+				let bytes_read = bytes_read?;
+				unsafe {
+					buf.advance(bytes_read);
+				}
+				Poll::Ready(Ok(()))
+			}
+			Poll::Pending => Poll::Pending,
+		}
+	}
 }
 
 impl hyper::rt::Write for HyperIo {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        self.project().inner.poll_write(cx, buf)
-    }
+	fn poll_write(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+		buf: &[u8],
+	) -> Poll<Result<usize, std::io::Error>> {
+		self.project().inner.poll_write(cx, buf)
+	}
 
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        self.project().inner.poll_flush(cx)
-    }
+	fn poll_flush(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+	) -> Poll<Result<(), std::io::Error>> {
+		self.project().inner.poll_flush(cx)
+	}
 
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        self.project().inner.poll_close(cx)
-    }
+	fn poll_shutdown(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+	) -> Poll<Result<(), std::io::Error>> {
+		self.project().inner.poll_close(cx)
+	}
 
-    fn poll_write_vectored(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        self.project().inner.poll_write_vectored(cx, bufs)
-    }
+	fn poll_write_vectored(
+		self: std::pin::Pin<&mut Self>,
+		cx: &mut std::task::Context<'_>,
+		bufs: &[std::io::IoSlice<'_>],
+	) -> Poll<Result<usize, std::io::Error>> {
+		self.project().inner.poll_write_vectored(cx, bufs)
+	}
 }
 
 impl Connection for HyperIo {
-    fn connected(&self) -> Connected {
-        Connected::new()
-    }
+	fn connected(&self) -> Connected {
+		Connected::new()
+	}
 }
 
 #[derive(Clone)]
 pub struct StreamProviderService(pub Arc<StreamProvider>);
 
-impl Service<hyper::Uri> for StreamProviderService {
-    type Response = HyperIo;
-    type Error = EpoxyError;
-    type Future = Pin<Box<impl Future<Output = Result<Self::Response, Self::Error>>>>;
+impl ConnectSvc for StreamProviderService {
+	type Connection = HyperIo;
+	type Error = EpoxyError;
+	type Future = Pin<Box<impl Future<Output = Result<Self::Connection, Self::Error>>>>;
 
-    fn poll_ready(
-        &mut self,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: hyper::Uri) -> Self::Future {
-        let provider = self.0.clone();
-        Box::pin(async move {
-            let scheme = req.scheme_str().ok_or(EpoxyError::InvalidUrlScheme)?;
-            let host = req.host().ok_or(EpoxyError::NoUrlHost)?.to_string();
-            let port = req.port_u16().map(Ok).unwrap_or_else(|| match scheme {
-                "https" | "wss" => Ok(443),
-                "http" | "ws" => Ok(80),
-                _ => Err(EpoxyError::NoUrlPort),
-            })?;
-            Ok(HyperIo {
-                inner: match scheme {
-                    "https" | "wss" => Either::Left(provider.get_tls_stream(host, port).await?),
-                    "http" | "ws" => {
-                        Either::Right(provider.get_asyncread(StreamType::Tcp, host, port).await?)
-                    }
-                    _ => return Err(EpoxyError::InvalidUrlScheme),
-                },
-            })
-        })
-    }
+	fn connect(self, req: hyper::Uri) -> Self::Future {
+		let provider = self.0.clone();
+		Box::pin(async move {
+			let scheme = req.scheme_str().ok_or(EpoxyError::InvalidUrlScheme)?;
+			let host = req.host().ok_or(EpoxyError::NoUrlHost)?.to_string();
+			let port = req.port_u16().map(Ok).unwrap_or_else(|| match scheme {
+				"https" | "wss" => Ok(443),
+				"http" | "ws" => Ok(80),
+				_ => Err(EpoxyError::NoUrlPort),
+			})?;
+			Ok(HyperIo {
+				inner: match scheme {
+					"https" | "wss" => Either::Left(provider.get_tls_stream(host, port).await?),
+					"http" | "ws" => {
+						Either::Right(provider.get_asyncread(StreamType::Tcp, host, port).await?)
+					}
+					_ => return Err(EpoxyError::InvalidUrlScheme),
+				},
+			})
+		})
+	}
 }
