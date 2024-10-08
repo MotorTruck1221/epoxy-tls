@@ -1,6 +1,11 @@
-use std::sync::Arc;
+#[cfg(feature = "twisp")]
+pub mod twisp;
+pub mod utils;
+
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
+use bytes::BytesMut;
 use cfg_if::cfg_if;
 use event_listener::Event;
 use futures_util::FutureExt;
@@ -10,11 +15,13 @@ use tokio::{
 	net::tcp::{OwnedReadHalf, OwnedWriteHalf},
 	select,
 	task::JoinSet,
+	time::interval,
 };
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use uuid::Uuid;
 use wisp_mux::{
-	CloseReason, ConnectPacket, MuxStream, MuxStreamAsyncRead, MuxStreamWrite, ServerMux,
+	ws::Payload, CloseReason, ConnectPacket, MuxStream, MuxStreamAsyncRead, MuxStreamWrite,
+	ServerMux,
 };
 
 use crate::{
@@ -64,7 +71,7 @@ async fn handle_stream(
 	muxstream: MuxStream,
 	id: String,
 	event: Arc<Event>,
-	#[cfg(feature = "twisp")] twisp_map: super::twisp::TwispMap,
+	#[cfg(feature = "twisp")] twisp_map: twisp::TwispMap,
 ) {
 	let requested_stream = connect.clone();
 
@@ -99,12 +106,9 @@ async fn handle_stream(
 
 	let uuid = Uuid::new_v4();
 
-	trace!(
+	debug!(
 		"new stream created for client id {:?}: (stream uuid {:?}) {:?} {:?}",
-		id,
-		uuid,
-		requested_stream,
-		resolved_stream
+		id, uuid, requested_stream, resolved_stream
 	);
 
 	if let Some(client) = CLIENTS.get(&id) {
@@ -175,9 +179,7 @@ async fn handle_stream(
 				let id = muxstream.stream_id;
 				let (mut rx, mut tx) = muxstream.into_io().into_asyncrw().into_split();
 
-				match super::twisp::handle_twisp(id, &mut rx, &mut tx, twisp_map.clone(), pty, cmd)
-					.await
-				{
+				match twisp::handle_twisp(id, &mut rx, &mut tx, twisp_map.clone(), pty, cmd).await {
 					Ok(()) => {
 						let _ = closer.close(CloseReason::Voluntary).await;
 					}
@@ -202,7 +204,7 @@ async fn handle_stream(
 		x = event.listen() => x,
 	};
 
-	trace!("stream uuid {:?} disconnected for client id {:?}", uuid, id);
+	debug!("stream uuid {:?} disconnected for client id {:?}", uuid, id);
 
 	if let Some(client) = CLIENTS.get(&id) {
 		client.0.remove(&uuid);
@@ -213,12 +215,12 @@ pub async fn handle_wisp(stream: WispResult, id: String) -> anyhow::Result<()> {
 	let (read, write) = stream;
 	cfg_if! {
 		if #[cfg(feature = "twisp")] {
-			let twisp_map = super::twisp::new_map();
-			let (extensions, buffer_size) = CONFIG.wisp.to_opts()?;
+			let twisp_map = twisp::new_map();
+			let (extensions, required_extensions, buffer_size) = CONFIG.wisp.to_opts().await?;
 
 			let extensions = match extensions {
 				Some(mut exts) => {
-					exts.push(super::twisp::new_ext(twisp_map.clone()));
+					exts.add_extension(twisp::new_ext(twisp_map.clone()));
 					Some(exts)
 				},
 				None => {
@@ -226,24 +228,52 @@ pub async fn handle_wisp(stream: WispResult, id: String) -> anyhow::Result<()> {
 				}
 			};
 		} else {
-			let (extensions, buffer_size) = CONFIG.wisp.to_opts()?;
+			let (extensions, required_extensions, buffer_size) = CONFIG.wisp.to_opts().await?;
 		}
 	}
 
-	let (mux, fut) = ServerMux::create(read, write, buffer_size, extensions.as_deref())
+	let (mux, fut) = ServerMux::create(read, write, buffer_size, extensions)
 		.await
 		.context("failed to create server multiplexor")?
-		.with_no_required_extensions();
+		.with_required_extensions(&required_extensions)
+		.await?;
+	let mux = Arc::new(mux);
 
 	debug!(
-		"new wisp client id {:?} connected with extensions {:?}",
-		id, mux.supported_extension_ids
+		"new wisp client id {:?} connected with extensions {:?}, downgraded {:?}",
+		id,
+		mux.supported_extensions
+			.iter()
+			.map(|x| x.get_id())
+			.collect::<Vec<_>>(),
+		mux.downgraded
 	);
 
 	let mut set: JoinSet<()> = JoinSet::new();
 	let event: Arc<Event> = Event::new().into();
 
-	set.spawn(tokio::task::unconstrained(fut.map(|_| {})));
+	let mux_id = id.clone();
+	set.spawn(tokio::task::unconstrained(fut.map(move |x| {
+		debug!("wisp client id {:?} multiplexor result {:?}", mux_id, x)
+	})));
+
+	let ping_mux = mux.clone();
+	let ping_event = event.clone();
+	let ping_id = id.clone();
+	set.spawn(async move {
+		let mut interval = interval(Duration::from_secs(30));
+		while ping_mux
+			.send_ping(Payload::Bytes(BytesMut::new()))
+			.await
+			.is_ok()
+		{
+			trace!("sent ping to wisp client id {:?}", ping_id);
+			select! {
+				_ = interval.tick() => (),
+				_ = ping_event.listen() => break,
+			};
+		}
+	});
 
 	while let Some((connect, stream)) = mux.server_new_stream().await {
 		set.spawn(handle_stream(
@@ -256,10 +286,12 @@ pub async fn handle_wisp(stream: WispResult, id: String) -> anyhow::Result<()> {
 		));
 	}
 
-	trace!("shutting down wisp client id {:?}", id);
+	debug!("shutting down wisp client id {:?}", id);
 
 	let _ = mux.close().await;
 	event.notify(usize::MAX);
+
+	trace!("waiting for tasks to close for wisp client id {:?}", id);
 
 	while set.join_next().await.is_some() {}
 

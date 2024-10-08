@@ -1,5 +1,8 @@
 use crate::{
-	inner::WsEvent, sink_unfold, ws::{Frame, LockedWebSocketWrite, Payload}, AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError
+	inner::WsEvent,
+	sink_unfold,
+	ws::{Frame, LockedWebSocketWrite, Payload},
+	AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -37,6 +40,7 @@ pub struct MuxStreamRead {
 	is_closed_event: Arc<Event>,
 	close_reason: Arc<AtomicCloseReason>,
 
+	should_flow_control: bool,
 	flow_control: Arc<AtomicU32>,
 	flow_control_read: AtomicU32,
 	target_flow_control: u32,
@@ -52,7 +56,7 @@ impl MuxStreamRead {
 			x = self.rx.recv_async() => x.ok()?,
 			_ = self.is_closed_event.listen().fuse() => return None
 		};
-		if self.role == Role::Server && self.stream_type == StreamType::Tcp {
+		if self.role == Role::Server && self.should_flow_control {
 			let val = self.flow_control_read.fetch_add(1, Ordering::AcqRel) + 1;
 			if val > self.target_flow_control && !self.is_closed.load(Ordering::Acquire) {
 				self.tx
@@ -111,6 +115,7 @@ pub struct MuxStreamWrite {
 	close_reason: Arc<AtomicCloseReason>,
 
 	continue_recieved: Arc<Event>,
+	should_flow_control: bool,
 	flow_control: Arc<AtomicU32>,
 }
 
@@ -121,7 +126,7 @@ impl MuxStreamWrite {
 		body: Frame<'a>,
 	) -> Result<(), WispError> {
 		if self.role == Role::Client
-			&& self.stream_type == StreamType::Tcp
+			&& self.should_flow_control
 			&& self.flow_control.load(Ordering::Acquire) == 0
 		{
 			self.continue_recieved.listen().await;
@@ -275,6 +280,7 @@ impl MuxStream {
 		is_closed: Arc<AtomicBool>,
 		is_closed_event: Arc<Event>,
 		close_reason: Arc<AtomicCloseReason>,
+		should_flow_control: bool,
 		flow_control: Arc<AtomicU32>,
 		continue_recieved: Arc<Event>,
 		target_flow_control: u32,
@@ -290,6 +296,7 @@ impl MuxStream {
 				is_closed: is_closed.clone(),
 				is_closed_event: is_closed_event.clone(),
 				close_reason: close_reason.clone(),
+				should_flow_control,
 				flow_control: flow_control.clone(),
 				flow_control_read: AtomicU32::new(0),
 				target_flow_control,
@@ -302,6 +309,7 @@ impl MuxStream {
 				tx,
 				is_closed: is_closed.clone(),
 				close_reason: close_reason.clone(),
+				should_flow_control,
 				flow_control: flow_control.clone(),
 				continue_recieved: continue_recieved.clone(),
 			},
@@ -469,12 +477,12 @@ impl Stream for MuxStreamIo {
 	}
 }
 
-impl Sink<&[u8]> for MuxStreamIo {
+impl Sink<BytesMut> for MuxStreamIo {
 	type Error = std::io::Error;
 	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		self.project().tx.poll_ready(cx)
 	}
-	fn start_send(self: Pin<&mut Self>, item: &[u8]) -> Result<(), Self::Error> {
+	fn start_send(self: Pin<&mut Self>, item: BytesMut) -> Result<(), Self::Error> {
 		self.project().tx.start_send(item)
 	}
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -544,7 +552,7 @@ impl MuxStreamIoSink {
 	}
 }
 
-impl Sink<&[u8]> for MuxStreamIoSink {
+impl Sink<BytesMut> for MuxStreamIoSink {
 	type Error = std::io::Error;
 	fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		self.project()
@@ -552,10 +560,10 @@ impl Sink<&[u8]> for MuxStreamIoSink {
 			.poll_ready(cx)
 			.map_err(std::io::Error::other)
 	}
-	fn start_send(self: Pin<&mut Self>, item: &[u8]) -> Result<(), Self::Error> {
+	fn start_send(self: Pin<&mut Self>, item: BytesMut) -> Result<(), Self::Error> {
 		self.project()
 			.tx
-			.start_send(Payload::Bytes(BytesMut::from(item)))
+			.start_send(Payload::Bytes(item))
 			.map_err(std::io::Error::other)
 	}
 	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -723,7 +731,7 @@ impl AsyncWrite for MuxStreamAsyncWrite {
 		let mut this = self.as_mut().project();
 
 		ready!(this.tx.as_mut().poll_ready(cx))?;
-		match this.tx.as_mut().start_send(buf) {
+		match this.tx.as_mut().start_send(buf.into()) {
 			Ok(()) => {
 				let mut cx = Context::from_waker(noop_waker_ref());
 				let cx = &mut cx;

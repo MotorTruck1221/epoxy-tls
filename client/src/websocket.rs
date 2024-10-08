@@ -16,14 +16,14 @@ use hyper::{
 	body::Incoming,
 	upgrade::{self, Upgraded},
 };
-use js_sys::{ArrayBuffer, Function, Object, Uint8Array};
+use js_sys::{ArrayBuffer, Function, Uint8Array};
 use tokio::io::WriteHalf;
 use wasm_bindgen::{prelude::*, JsError, JsValue};
 use wasm_bindgen_futures::spawn_local;
 
 use crate::{
 	tokioio::TokioIo,
-	utils::{entries_of_object, ws_key},
+	utils::{entries_of_object, from_entries, ws_key},
 	EpoxyClient, EpoxyError, EpoxyHandlers, HttpBody,
 };
 
@@ -69,7 +69,7 @@ impl EpoxyWebSocket {
 			}
 
 			if web_sys::Headers::instanceof(&headers)
-				&& let Ok(entries) = Object::from_entries(&headers)
+				&& let Ok(entries) = from_entries(&headers)
 			{
 				for header in entries_of_object(&entries) {
 					request = request.header(&header[0], &header[1]);
@@ -205,27 +205,34 @@ impl EpoxyWebSocket {
 // https://github.com/snapview/tungstenite-rs/blob/314feea3055a93e585882fb769854a912a7e6dae/src/handshake/client.rs#L189
 fn verify(response: &Response<Incoming>) -> Result<(), EpoxyError> {
 	if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-		return Err(EpoxyError::WsInvalidStatusCode);
+		return Err(EpoxyError::WsInvalidStatusCode(
+			response.status().as_u16(),
+			StatusCode::SWITCHING_PROTOCOLS.as_u16(),
+		));
 	}
 
 	let headers = response.headers();
 
-	if !headers
+	let upgrade_header = headers
 		.get(UPGRADE)
 		.and_then(|h| h.to_str().ok())
-		.map(|h| h.eq_ignore_ascii_case("websocket"))
-		.unwrap_or(false)
-	{
-		return Err(EpoxyError::WsInvalidUpgradeHeader);
+		.unwrap_or_default();
+
+	if !upgrade_header.eq_ignore_ascii_case("websocket") {
+		return Err(EpoxyError::WsInvalidUpgradeHeader(
+			upgrade_header.to_string(),
+		));
 	}
 
-	if !headers
+	let connection_header = headers
 		.get(CONNECTION)
 		.and_then(|h| h.to_str().ok())
-		.map(|h| h.eq_ignore_ascii_case("Upgrade"))
-		.unwrap_or(false)
-	{
-		return Err(EpoxyError::WsInvalidConnectionHeader);
+		.unwrap_or_default();
+
+	if !connection_header.eq_ignore_ascii_case("Upgrade") {
+		return Err(EpoxyError::WsInvalidConnectionHeader(
+			connection_header.to_string(),
+		));
 	}
 
 	Ok(())

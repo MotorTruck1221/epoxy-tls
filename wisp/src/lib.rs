@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+#![deny(missing_docs, clippy::todo)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! A library for easily creating [Wisp] clients and servers.
 //!
@@ -19,19 +19,21 @@ pub mod ws;
 
 pub use crate::{packet::*, stream::*};
 
-use extensions::{udp::UdpProtocolExtension, AnyProtocolExtension, ProtocolExtensionBuilder};
+use extensions::{udp::UdpProtocolExtension, AnyProtocolExtension, AnyProtocolExtensionBuilder};
 use flume as mpsc;
 use futures::{channel::oneshot, select, Future, FutureExt};
 use futures_timer::Delay;
 use inner::{MuxInner, WsEvent};
 use std::{
+	ops::DerefMut,
+	pin::Pin,
 	sync::{
 		atomic::{AtomicBool, Ordering},
 		Arc,
 	},
 	time::Duration,
 };
-use ws::{AppendingWebSocketRead, LockedWebSocketWrite};
+use ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload};
 
 /// Wisp version supported by this crate.
 pub const WISP_VERSION: WispVersion = WispVersion { major: 2, minor: 0 };
@@ -68,8 +70,9 @@ pub enum WispError {
 	IncompatibleProtocolVersion,
 	/// The stream had already been closed.
 	StreamAlreadyClosed,
+
 	/// The websocket frame received had an invalid type.
-	WsFrameInvalidType,
+	WsFrameInvalidType(ws::OpCode),
 	/// The websocket frame received was not finished.
 	WsFrameNotFinished,
 	/// Error specific to the websocket implementation.
@@ -78,24 +81,33 @@ pub enum WispError {
 	WsImplSocketClosed,
 	/// The websocket implementation did not support the action.
 	WsImplNotSupported,
-	/// Error specific to the protocol extension implementation.
-	ExtensionImplError(Box<dyn std::error::Error + Sync + Send>),
-	/// The protocol extension implementation did not support the action.
-	ExtensionImplNotSupported,
-	/// The specified protocol extensions are not supported by the server.
-	ExtensionsNotSupported(Vec<u8>),
+
 	/// The string was invalid UTF-8.
 	Utf8Error(std::str::Utf8Error),
 	/// The integer failed to convert.
 	TryFromIntError(std::num::TryFromIntError),
 	/// Other error.
 	Other(Box<dyn std::error::Error + Sync + Send>),
+
 	/// Failed to send message to multiplexor task.
 	MuxMessageFailedToSend,
 	/// Failed to receive message from multiplexor task.
 	MuxMessageFailedToRecv,
 	/// Multiplexor task ended.
 	MuxTaskEnded,
+	/// Multiplexor task already started.
+	MuxTaskStarted,
+
+	/// Error specific to the protocol extension implementation.
+	ExtensionImplError(Box<dyn std::error::Error + Sync + Send>),
+	/// The protocol extension implementation did not support the action.
+	ExtensionImplNotSupported,
+	/// The specified protocol extensions are not supported by the server.
+	ExtensionsNotSupported(Vec<u8>),
+	/// The password authentication username/password was invalid.
+	PasswordExtensionCredsInvalid,
+	/// The certificate authentication signature was invalid.
+	CertAuthExtensionSigInvalid,
 }
 
 impl From<std::str::Utf8Error> for WispError {
@@ -123,7 +135,7 @@ impl std::fmt::Display for WispError {
 			Self::MaxStreamCountReached => write!(f, "Maximum stream count reached"),
 			Self::IncompatibleProtocolVersion => write!(f, "Incompatible Wisp protocol version"),
 			Self::StreamAlreadyClosed => write!(f, "Stream already closed"),
-			Self::WsFrameInvalidType => write!(f, "Invalid websocket frame type"),
+			Self::WsFrameInvalidType(ty) => write!(f, "Invalid websocket frame type: {:?}", ty),
 			Self::WsFrameNotFinished => write!(f, "Unfinished websocket frame"),
 			Self::WsImplError(err) => write!(f, "Websocket implementation error: {}", err),
 			Self::WsImplSocketClosed => {
@@ -150,6 +162,13 @@ impl std::fmt::Display for WispError {
 			Self::MuxMessageFailedToSend => write!(f, "Failed to send multiplexor message"),
 			Self::MuxMessageFailedToRecv => write!(f, "Failed to receive multiplexor message"),
 			Self::MuxTaskEnded => write!(f, "Multiplexor task ended"),
+			Self::MuxTaskStarted => write!(f, "Multiplexor task already started"),
+			Self::PasswordExtensionCredsInvalid => {
+				write!(f, "Password extension: Invalid username/password")
+			}
+			Self::CertAuthExtensionSigInvalid => {
+				write!(f, "Certificate authentication extension: Invalid signature")
+			}
 		}
 	}
 }
@@ -159,7 +178,8 @@ impl std::error::Error for WispError {}
 async fn maybe_wisp_v2<R>(
 	read: &mut R,
 	write: &LockedWebSocketWrite,
-	builders: &[Box<dyn ProtocolExtensionBuilder + Sync + Send>],
+	role: Role,
+	builders: &mut [AnyProtocolExtensionBuilder],
 ) -> Result<(Vec<AnyProtocolExtension>, Option<ws::Frame<'static>>, bool), WispError>
 where
 	R: ws::WebSocketRead + Send,
@@ -173,7 +193,7 @@ where
 		x = read.wisp_read_frame(write).fuse() => Some(x?),
 		_ = Delay::new(Duration::from_secs(5)).fuse() => None
 	} {
-		let packet = Packet::maybe_parse_info(frame, Role::Client, builders)?;
+		let packet = Packet::maybe_parse_info(frame, role, builders)?;
 		if let PacketType::Info(info) = packet.packet_type {
 			supported_extensions = info
 				.extensions
@@ -192,108 +212,182 @@ where
 	Ok((supported_extensions, extra_packet, downgraded))
 }
 
+async fn send_info_packet(
+	write: &LockedWebSocketWrite,
+	builders: &mut [AnyProtocolExtensionBuilder],
+) -> Result<(), WispError> {
+	write
+		.write_frame(
+			Packet::new_info(
+				builders
+					.iter_mut()
+					.map(|x| x.build_to_extension(Role::Server))
+					.collect::<Result<Vec<_>, _>>()?,
+			)
+			.into(),
+		)
+		.await
+}
+
+/// Wisp V2 handshake and protocol extension settings wrapper struct.
+pub struct WispV2Extensions {
+	builders: Vec<AnyProtocolExtensionBuilder>,
+	closure: Box<
+		dyn Fn(
+				&mut [AnyProtocolExtensionBuilder],
+			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
+			+ Send,
+	>,
+}
+
+impl WispV2Extensions {
+	/// Create a Wisp V2 settings struct with no middleware.
+	pub fn new(builders: Vec<AnyProtocolExtensionBuilder>) -> Self {
+		Self {
+			builders,
+			closure: Box::new(|_| Box::pin(async { Ok(()) })),
+		}
+	}
+
+	/// Create a Wisp V2 settings struct with some middleware.
+	pub fn new_with_middleware<C>(builders: Vec<AnyProtocolExtensionBuilder>, closure: C) -> Self
+	where
+		C: Fn(
+				&mut [AnyProtocolExtensionBuilder],
+			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
+			+ Send
+			+ 'static,
+	{
+		Self {
+			builders,
+			closure: Box::new(closure),
+		}
+	}
+
+	/// Add a Wisp V2 extension builder to the settings struct.
+	pub fn add_extension(&mut self, extension: AnyProtocolExtensionBuilder) {
+		self.builders.push(extension);
+	}
+}
+
 /// Server-side multiplexor.
-///
-/// # Example
-/// ```
-/// use wisp_mux::ServerMux;
-///
-/// let (mux, fut) = ServerMux::new(rx, tx, 128, Some([]));
-/// tokio::spawn(async move {
-///     if let Err(e) = fut.await {
-///         println!("error in multiplexor: {:?}", e);
-///     }
-/// });
-/// while let Some((packet, stream)) = mux.server_new_stream().await {
-///     tokio::spawn(async move {
-///         let url = format!("{}:{}", packet.destination_hostname, packet.destination_port);
-///         // do something with `url` and `packet.stream_type`
-///     });
-/// }
-/// ```
 pub struct ServerMux {
 	/// Whether the connection was downgraded to Wisp v1.
 	///
 	/// If this variable is true you must assume no extensions are supported.
 	pub downgraded: bool,
 	/// Extensions that are supported by both sides.
-	pub supported_extension_ids: Vec<u8>,
+	pub supported_extensions: Vec<AnyProtocolExtension>,
 	actor_tx: mpsc::Sender<WsEvent>,
 	muxstream_recv: mpsc::Receiver<(ConnectPacket, MuxStream)>,
 	tx: ws::LockedWebSocketWrite,
-	fut_exited: Arc<AtomicBool>,
+	actor_exited: Arc<AtomicBool>,
 }
 
 impl ServerMux {
 	/// Create a new server-side multiplexor.
 	///
-	/// If `extension_builders` is None a Wisp v1 connection is created otherwise a Wisp v2 connection is created.
+	/// If `wisp_v2` is None a Wisp v1 connection is created otherwise a Wisp v2 connection is created.
 	/// **It is not guaranteed that all extensions you specify are available.** You must manually check
 	/// if the extensions you need are available after the multiplexor has been created.
 	pub async fn create<R, W>(
 		mut rx: R,
 		tx: W,
 		buffer_size: u32,
-		extension_builders: Option<&[Box<dyn ProtocolExtensionBuilder + Send + Sync>]>,
+		wisp_v2: Option<WispV2Extensions>,
 	) -> Result<ServerMuxResult<impl Future<Output = Result<(), WispError>> + Send>, WispError>
 	where
 		R: ws::WebSocketRead + Send,
 		W: ws::WebSocketWrite + Send + 'static,
 	{
 		let tx = ws::LockedWebSocketWrite::new(Box::new(tx));
-
-		tx.write_frame(Packet::new_continue(0, buffer_size).into())
-			.await?;
-
-		let (supported_extensions, extra_packet, downgraded) =
-			if let Some(builders) = extension_builders {
-				tx.write_frame(
-					Packet::new_info(
-						builders
-							.iter()
-							.map(|x| x.build_to_extension(Role::Client))
-							.collect(),
-					)
-					.into(),
-				)
+		let ret_tx = tx.clone();
+		let ret = async {
+			tx.write_frame(Packet::new_continue(0, buffer_size).into())
 				.await?;
-				maybe_wisp_v2(&mut rx, &tx, builders).await?
+
+			let (supported_extensions, extra_packet, downgraded) = if let Some(WispV2Extensions {
+				mut builders,
+				closure,
+			}) = wisp_v2
+			{
+				send_info_packet(&tx, builders.deref_mut()).await?;
+				(closure)(builders.deref_mut()).await?;
+				maybe_wisp_v2(&mut rx, &tx, Role::Server, &mut builders).await?
 			} else {
 				(Vec::new(), None, true)
 			};
 
-		let supported_extension_ids = supported_extensions.iter().map(|x| x.get_id()).collect();
+			let (mux_result, muxstream_recv) = MuxInner::new_server(
+				AppendingWebSocketRead(extra_packet, rx),
+				tx.clone(),
+				supported_extensions.clone(),
+				buffer_size,
+			);
 
-		let (mux_inner, fut_exited, actor_tx, muxstream_recv) = MuxInner::new_server(
-			AppendingWebSocketRead(extra_packet, rx),
-			tx.clone(),
-			supported_extensions,
-			buffer_size,
-		);
+			Ok(ServerMuxResult(
+				Self {
+					muxstream_recv,
+					actor_tx: mux_result.actor_tx,
+					downgraded,
+					supported_extensions,
+					tx,
+					actor_exited: mux_result.actor_exited,
+				},
+				mux_result.mux.into_future(),
+			))
+		}
+		.await;
 
-		Ok(ServerMuxResult(
-			Self {
-				muxstream_recv,
-				actor_tx,
-				downgraded,
-				supported_extension_ids,
-				tx,
-				fut_exited: fut_exited.clone(),
+		match ret {
+			Ok(x) => Ok(x),
+			Err(x) => match x {
+				WispError::PasswordExtensionCredsInvalid => {
+					ret_tx
+						.write_frame(
+							Packet::new_close(0, CloseReason::ExtensionsPasswordAuthFailed).into(),
+						)
+						.await?;
+					ret_tx.close().await?;
+					Err(x)
+				}
+				WispError::CertAuthExtensionSigInvalid => {
+					ret_tx
+						.write_frame(
+							Packet::new_close(0, CloseReason::ExtensionsCertAuthFailed).into(),
+						)
+						.await?;
+					ret_tx.close().await?;
+					Err(x)
+				}
+				x => Err(x),
 			},
-			mux_inner.into_future(),
-		))
+		}
 	}
 
 	/// Wait for a stream to be created.
 	pub async fn server_new_stream(&self) -> Option<(ConnectPacket, MuxStream)> {
-		if self.fut_exited.load(Ordering::Acquire) {
+		if self.actor_exited.load(Ordering::Acquire) {
 			return None;
 		}
 		self.muxstream_recv.recv_async().await.ok()
 	}
 
+	/// Send a ping to the client.
+	pub async fn send_ping(&self, payload: Payload<'static>) -> Result<(), WispError> {
+		if self.actor_exited.load(Ordering::Acquire) {
+			return Err(WispError::MuxTaskEnded);
+		}
+		let (tx, rx) = oneshot::channel();
+		self.actor_tx
+			.send_async(WsEvent::SendPing(payload, tx))
+			.await
+			.map_err(|_| WispError::MuxMessageFailedToSend)?;
+		rx.await.map_err(|_| WispError::MuxMessageFailedToRecv)?
+	}
+
 	async fn close_internal(&self, reason: Option<CloseReason>) -> Result<(), WispError> {
-		if self.fut_exited.load(Ordering::Acquire) {
+		if self.actor_exited.load(Ordering::Acquire) {
 			return Err(WispError::MuxTaskEnded);
 		}
 		self.actor_tx
@@ -309,12 +403,11 @@ impl ServerMux {
 		self.close_internal(None).await
 	}
 
-	/// Close all streams and send an extension incompatibility error to the client.
+	/// Close all streams and send a close reason on stream ID 0.
 	///
 	/// Also terminates the multiplexor future.
-	pub async fn close_extension_incompat(&self) -> Result<(), WispError> {
-		self.close_internal(Some(CloseReason::IncompatibleExtensions))
-			.await
+	pub async fn close_with_reason(&self, reason: CloseReason) -> Result<(), WispError> {
+		self.close_internal(Some(reason)).await
 	}
 
 	/// Get a protocol extension stream for sending packets with stream id 0.
@@ -322,7 +415,7 @@ impl ServerMux {
 		MuxProtocolExtensionStream {
 			stream_id: 0,
 			tx: self.tx.clone(),
-			is_closed: self.fut_exited.clone(),
+			is_closed: self.actor_exited.clone(),
 		}
 	}
 }
@@ -355,14 +448,21 @@ where
 	) -> Result<(ServerMux, F), WispError> {
 		let mut unsupported_extensions = Vec::new();
 		for extension in extensions {
-			if !self.0.supported_extension_ids.contains(extension) {
+			if !self
+				.0
+				.supported_extensions
+				.iter()
+				.any(|x| x.get_id() == *extension)
+			{
 				unsupported_extensions.push(*extension);
 			}
 		}
 		if unsupported_extensions.is_empty() {
 			Ok((self.0, self.1))
 		} else {
-			self.0.close_extension_incompat().await?;
+			self.0
+				.close_with_reason(CloseReason::ExtensionsIncompatible)
+				.await?;
 			self.1.await?;
 			Err(WispError::ExtensionsNotSupported(unsupported_extensions))
 		}
@@ -376,41 +476,28 @@ where
 }
 
 /// Client side multiplexor.
-///
-/// # Example
-/// ```
-/// use wisp_mux::{ClientMux, StreamType};
-///
-/// let (mux, fut) = ClientMux::new(rx, tx, Some([])).await?;
-/// tokio::spawn(async move {
-///     if let Err(e) = fut.await {
-///         println!("error in multiplexor: {:?}", e);
-///     }
-/// });
-/// let stream = mux.client_new_stream(StreamType::Tcp, "google.com", 80);
-/// ```
 pub struct ClientMux {
 	/// Whether the connection was downgraded to Wisp v1.
 	///
 	/// If this variable is true you must assume no extensions are supported.
 	pub downgraded: bool,
 	/// Extensions that are supported by both sides.
-	pub supported_extension_ids: Vec<u8>,
+	pub supported_extensions: Vec<AnyProtocolExtension>,
 	actor_tx: mpsc::Sender<WsEvent>,
 	tx: ws::LockedWebSocketWrite,
-	fut_exited: Arc<AtomicBool>,
+	actor_exited: Arc<AtomicBool>,
 }
 
 impl ClientMux {
 	/// Create a new client side multiplexor.
 	///
-	/// If `extension_builders` is None a Wisp v1 connection is created otherwise a Wisp v2 connection is created.
+	/// If `wisp_v2` is None a Wisp v1 connection is created otherwise a Wisp v2 connection is created.
 	/// **It is not guaranteed that all extensions you specify are available.** You must manually check
 	/// if the extensions you need are available after the multiplexor has been created.
 	pub async fn create<R, W>(
 		mut rx: R,
 		tx: W,
-		extension_builders: Option<&[Box<dyn ProtocolExtensionBuilder + Send + Sync>]>,
+		wisp_v2: Option<WispV2Extensions>,
 	) -> Result<ClientMuxResult<impl Future<Output = Result<(), WispError>> + Send>, WispError>
 	where
 		R: ws::WebSocketRead + Send,
@@ -424,45 +511,38 @@ impl ClientMux {
 		}
 
 		if let PacketType::Continue(packet) = first_packet.packet_type {
-			let (supported_extensions, extra_packet, downgraded) =
-				if let Some(builders) = extension_builders {
-					let x = maybe_wisp_v2(&mut rx, &tx, builders).await?;
-					// if not downgraded
-					if !x.2 {
-						tx.write_frame(
-							Packet::new_info(
-								builders
-									.iter()
-									.map(|x| x.build_to_extension(Role::Client))
-									.collect(),
-							)
-							.into(),
-						)
-						.await?;
-					}
-					x
-				} else {
-					(Vec::new(), None, true)
-				};
+			let (supported_extensions, extra_packet, downgraded) = if let Some(WispV2Extensions {
+				mut builders,
+				closure,
+			}) = wisp_v2
+			{
+				let res = maybe_wisp_v2(&mut rx, &tx, Role::Client, &mut builders).await?;
+				// if not downgraded
+				if !res.2 {
+					(closure)(&mut builders).await?;
+					send_info_packet(&tx, &mut builders).await?;
+				}
+				res
+			} else {
+				(Vec::new(), None, true)
+			};
 
-			let supported_extension_ids = supported_extensions.iter().map(|x| x.get_id()).collect();
-
-			let (mux_inner, fut_exited, actor_tx) = MuxInner::new_client(
+			let mux_result = MuxInner::new_client(
 				AppendingWebSocketRead(extra_packet, rx),
 				tx.clone(),
-				supported_extensions,
+				supported_extensions.clone(),
 				packet.buffer_remaining,
 			);
 
 			Ok(ClientMuxResult(
 				Self {
-					actor_tx,
+					actor_tx: mux_result.actor_tx,
 					downgraded,
-					supported_extension_ids,
+					supported_extensions,
 					tx,
-					fut_exited,
+					actor_exited: mux_result.actor_exited,
 				},
-				mux_inner.into_future(),
+				mux_result.mux.into_future(),
 			))
 		} else {
 			Err(WispError::InvalidPacketType)
@@ -476,14 +556,14 @@ impl ClientMux {
 		host: String,
 		port: u16,
 	) -> Result<MuxStream, WispError> {
-		if self.fut_exited.load(Ordering::Acquire) {
+		if self.actor_exited.load(Ordering::Acquire) {
 			return Err(WispError::MuxTaskEnded);
 		}
 		if stream_type == StreamType::Udp
 			&& !self
-				.supported_extension_ids
+				.supported_extensions
 				.iter()
-				.any(|x| *x == UdpProtocolExtension::ID)
+				.any(|x| x.get_id() == UdpProtocolExtension::ID)
 		{
 			return Err(WispError::ExtensionsNotSupported(vec![
 				UdpProtocolExtension::ID,
@@ -497,8 +577,21 @@ impl ClientMux {
 		rx.await.map_err(|_| WispError::MuxMessageFailedToRecv)?
 	}
 
+	/// Send a ping to the server.
+	pub async fn send_ping(&self, payload: Payload<'static>) -> Result<(), WispError> {
+		if self.actor_exited.load(Ordering::Acquire) {
+			return Err(WispError::MuxTaskEnded);
+		}
+		let (tx, rx) = oneshot::channel();
+		self.actor_tx
+			.send_async(WsEvent::SendPing(payload, tx))
+			.await
+			.map_err(|_| WispError::MuxMessageFailedToSend)?;
+		rx.await.map_err(|_| WispError::MuxMessageFailedToRecv)?
+	}
+
 	async fn close_internal(&self, reason: Option<CloseReason>) -> Result<(), WispError> {
-		if self.fut_exited.load(Ordering::Acquire) {
+		if self.actor_exited.load(Ordering::Acquire) {
 			return Err(WispError::MuxTaskEnded);
 		}
 		self.actor_tx
@@ -514,12 +607,11 @@ impl ClientMux {
 		self.close_internal(None).await
 	}
 
-	/// Close all streams and send an extension incompatibility error to the client.
+	/// Close all streams and send a close reason on stream ID 0.
 	///
 	/// Also terminates the multiplexor future.
-	pub async fn close_extension_incompat(&self) -> Result<(), WispError> {
-		self.close_internal(Some(CloseReason::IncompatibleExtensions))
-			.await
+	pub async fn close_with_reason(&self, reason: CloseReason) -> Result<(), WispError> {
+		self.close_internal(Some(reason)).await
 	}
 
 	/// Get a protocol extension stream for sending packets with stream id 0.
@@ -527,7 +619,7 @@ impl ClientMux {
 		MuxProtocolExtensionStream {
 			stream_id: 0,
 			tx: self.tx.clone(),
-			is_closed: self.fut_exited.clone(),
+			is_closed: self.actor_exited.clone(),
 		}
 	}
 }
@@ -559,14 +651,21 @@ where
 	) -> Result<(ClientMux, F), WispError> {
 		let mut unsupported_extensions = Vec::new();
 		for extension in extensions {
-			if !self.0.supported_extension_ids.contains(extension) {
+			if !self
+				.0
+				.supported_extensions
+				.iter()
+				.any(|x| x.get_id() == *extension)
+			{
 				unsupported_extensions.push(*extension);
 			}
 		}
 		if unsupported_extensions.is_empty() {
 			Ok((self.0, self.1))
 		} else {
-			self.0.close_extension_incompat().await?;
+			self.0
+				.close_with_reason(CloseReason::ExtensionsIncompatible)
+				.await?;
 			self.1.await?;
 			Err(WispError::ExtensionsNotSupported(unsupported_extensions))
 		}

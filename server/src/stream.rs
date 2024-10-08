@@ -10,10 +10,10 @@ use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, WebSocketError};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use regex::RegexSet;
-use tokio::net::{lookup_host, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use wisp_mux::{ConnectPacket, StreamType};
 
-use crate::CONFIG;
+use crate::{CONFIG, RESOLVER};
 
 fn match_addr(str: &str, allowed: &RegexSet, blocked: &RegexSet) -> bool {
 	blocked.is_match(str) && !allowed.is_match(str)
@@ -56,7 +56,7 @@ impl ClientStream {
 		cfg_if! {
 			if #[cfg(feature = "twisp")] {
 				if let StreamType::Unknown(ty) = packet.stream_type {
-					if ty == crate::handle::twisp::STREAM_TYPE && CONFIG.stream.allow_twisp && CONFIG.wisp.wisp_v2 {
+					if ty == crate::handle::wisp::twisp::STREAM_TYPE && CONFIG.stream.allow_twisp && CONFIG.wisp.wisp_v2 {
 						return Ok(ResolvedPacket::Valid(packet));
 					} else {
 						return Ok(ResolvedPacket::Invalid);
@@ -125,13 +125,14 @@ impl ClientStream {
 			return Ok(ResolvedPacket::Blocked);
 		}
 
-		let packet = lookup_host(packet.destination_hostname + ":0")
+		let packet = RESOLVER
+			.resolve(packet.destination_hostname)
 			.await
 			.context("failed to resolve hostname")?
 			.filter(|x| CONFIG.server.resolve_ipv6 || x.is_ipv4())
 			.map(|x| ConnectPacket {
 				stream_type: packet.stream_type,
-				destination_hostname: x.ip().to_string(),
+				destination_hostname: x.to_string(),
 				destination_port: packet.destination_port,
 			})
 			.next();
@@ -183,7 +184,7 @@ impl ClientStream {
 				Ok(ClientStream::Udp(stream))
 			}
 			#[cfg(feature = "twisp")]
-			StreamType::Unknown(crate::handle::twisp::STREAM_TYPE) => {
+			StreamType::Unknown(crate::handle::wisp::twisp::STREAM_TYPE) => {
 				if !CONFIG.stream.allow_twisp {
 					return Ok(ClientStream::Blocked);
 				}

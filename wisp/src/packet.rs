@@ -1,5 +1,5 @@
 use crate::{
-	extensions::{AnyProtocolExtension, ProtocolExtensionBuilder},
+	extensions::{AnyProtocolExtension, AnyProtocolExtensionBuilder},
 	ws::{self, Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead},
 	Role, WispError, WISP_VERSION,
 };
@@ -60,7 +60,7 @@ mod close {
 		/// Unexpected stream closure due to a network error.
 		Unexpected = 0x03,
 		/// Incompatible extensions. Only used during the handshake.
-		IncompatibleExtensions = 0x04,
+		ExtensionsIncompatible = 0x04,
 		/// Stream creation failed due to invalid information.
 		ServerStreamInvalidInfo = 0x41,
 		/// Stream creation failed due to an unreachable destination host.
@@ -77,6 +77,10 @@ mod close {
 		ServerStreamThrottled = 0x49,
 		/// The client has encountered an unexpected error.
 		ClientUnexpected = 0x81,
+		/// Authentication failed due to invalid username/password.
+		ExtensionsPasswordAuthFailed = 0xc0,
+		/// Authentication failed due to invalid signature.
+		ExtensionsCertAuthFailed = 0xc1,
 	}
 
 	impl TryFrom<u8> for CloseReason {
@@ -87,7 +91,7 @@ mod close {
 				0x01 => Ok(R::Unknown),
 				0x02 => Ok(R::Voluntary),
 				0x03 => Ok(R::Unexpected),
-				0x04 => Ok(R::IncompatibleExtensions),
+				0x04 => Ok(R::ExtensionsIncompatible),
 				0x41 => Ok(R::ServerStreamInvalidInfo),
 				0x42 => Ok(R::ServerStreamUnreachable),
 				0x43 => Ok(R::ServerStreamConnectionTimedOut),
@@ -111,7 +115,7 @@ mod close {
 					C::Unknown => "Unknown close reason",
 					C::Voluntary => "Voluntarily closed",
 					C::Unexpected => "Unexpectedly closed",
-					C::IncompatibleExtensions => "Incompatible protocol extensions",
+					C::ExtensionsIncompatible => "Incompatible protocol extensions",
 					C::ServerStreamInvalidInfo =>
 						"Stream creation failed due to invalid information",
 					C::ServerStreamUnreachable =>
@@ -124,6 +128,8 @@ mod close {
 					C::ServerStreamBlockedAddress => "Destination address is blocked",
 					C::ServerStreamThrottled => "Throttled",
 					C::ClientUnexpected => "Client encountered unexpected error",
+					C::ExtensionsPasswordAuthFailed => "Invalid username/password",
+					C::ExtensionsCertAuthFailed => "Invalid signature",
 				}
 			)
 		}
@@ -425,16 +431,63 @@ impl<'a> Packet<'a> {
 		})
 	}
 
+	fn parse_info(
+		mut bytes: Payload<'a>,
+		role: Role,
+		extension_builders: &mut [AnyProtocolExtensionBuilder],
+	) -> Result<Self, WispError> {
+		// packet type is already read by code that calls this
+		if bytes.remaining() < 4 + 2 {
+			return Err(WispError::PacketTooSmall);
+		}
+		if bytes.get_u32_le() != 0 {
+			return Err(WispError::InvalidStreamId);
+		}
+
+		let version = WispVersion {
+			major: bytes.get_u8(),
+			minor: bytes.get_u8(),
+		};
+
+		if version.major != WISP_VERSION.major {
+			return Err(WispError::IncompatibleProtocolVersion);
+		}
+
+		let mut extensions = Vec::new();
+
+		while bytes.remaining() > 4 {
+			// We have some extensions
+			let id = bytes.get_u8();
+			let length = usize::try_from(bytes.get_u32_le())?;
+			if bytes.remaining() < length {
+				return Err(WispError::PacketTooSmall);
+			}
+			if let Some(builder) = extension_builders.iter_mut().find(|x| x.get_id() == id) {
+				extensions.push(builder.build_from_bytes(bytes.copy_to_bytes(length), role)?)
+			} else {
+				bytes.advance(length)
+			}
+		}
+
+		Ok(Self {
+			stream_id: 0,
+			packet_type: PacketType::Info(InfoPacket {
+				version,
+				extensions,
+			}),
+		})
+	}
+
 	pub(crate) fn maybe_parse_info(
 		frame: Frame<'a>,
 		role: Role,
-		extension_builders: &[Box<(dyn ProtocolExtensionBuilder + Send + Sync)>],
+		extension_builders: &mut [AnyProtocolExtensionBuilder],
 	) -> Result<Self, WispError> {
 		if !frame.finished {
 			return Err(WispError::WsFrameNotFinished);
 		}
 		if frame.opcode != OpCode::Binary {
-			return Err(WispError::WsFrameInvalidType);
+			return Err(WispError::WsFrameInvalidType(frame.opcode));
 		}
 		let mut bytes = frame.payload;
 		if bytes.remaining() < 1 {
@@ -458,7 +511,7 @@ impl<'a> Packet<'a> {
 			return Err(WispError::WsFrameNotFinished);
 		}
 		if frame.opcode != OpCode::Binary {
-			return Err(WispError::WsFrameInvalidType);
+			return Err(WispError::WsFrameInvalidType(frame.opcode));
 		}
 		let mut bytes = frame.payload;
 		if bytes.remaining() < 5 {
@@ -498,55 +551,6 @@ impl<'a> Packet<'a> {
 			}
 		}
 	}
-
-	fn parse_info(
-		mut bytes: Payload<'a>,
-		role: Role,
-		extension_builders: &[Box<(dyn ProtocolExtensionBuilder + Send + Sync)>],
-	) -> Result<Self, WispError> {
-		// packet type is already read by code that calls this
-		if bytes.remaining() < 4 + 2 {
-			return Err(WispError::PacketTooSmall);
-		}
-		if bytes.get_u32_le() != 0 {
-			return Err(WispError::InvalidStreamId);
-		}
-
-		let version = WispVersion {
-			major: bytes.get_u8(),
-			minor: bytes.get_u8(),
-		};
-
-		if version.major != WISP_VERSION.major {
-			return Err(WispError::IncompatibleProtocolVersion);
-		}
-
-		let mut extensions = Vec::new();
-
-		while bytes.remaining() > 4 {
-			// We have some extensions
-			let id = bytes.get_u8();
-			let length = usize::try_from(bytes.get_u32_le())?;
-			if bytes.remaining() < length {
-				return Err(WispError::PacketTooSmall);
-			}
-			if let Some(builder) = extension_builders.iter().find(|x| x.get_id() == id) {
-				if let Ok(extension) = builder.build_from_bytes(bytes.copy_to_bytes(length), role) {
-					extensions.push(extension)
-				}
-			} else {
-				bytes.advance(length)
-			}
-		}
-
-		Ok(Self {
-			stream_id: 0,
-			packet_type: PacketType::Info(InfoPacket {
-				version,
-				extensions,
-			}),
-		})
-	}
 }
 
 impl Encode for Packet<'_> {
@@ -583,7 +587,7 @@ impl<'a> TryFrom<ws::Frame<'a>> for Packet<'a> {
 			return Err(Self::Error::WsFrameNotFinished);
 		}
 		if frame.opcode != ws::OpCode::Binary {
-			return Err(Self::Error::WsFrameInvalidType);
+			return Err(Self::Error::WsFrameInvalidType(frame.opcode));
 		}
 		Packet::try_from(frame.payload)
 	}

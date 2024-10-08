@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::RangeInclusive, path::PathBuf};
+use std::{collections::HashMap, net::IpAddr, ops::RangeInclusive, path::PathBuf};
 
 use cfg_if::cfg_if;
 use clap::{Parser, ValueEnum};
@@ -6,21 +6,42 @@ use lazy_static::lazy_static;
 use log::LevelFilter;
 use regex::RegexSet;
 use serde::{Deserialize, Serialize};
-use wisp_mux::extensions::{
-	password::PasswordProtocolExtensionBuilder, udp::UdpProtocolExtensionBuilder,
-	ProtocolExtensionBuilder,
+use wisp_mux::{
+	extensions::{
+		cert::{CertAuthProtocolExtension, CertAuthProtocolExtensionBuilder},
+		motd::MotdProtocolExtensionBuilder,
+		password::{PasswordProtocolExtension, PasswordProtocolExtensionBuilder},
+		udp::UdpProtocolExtensionBuilder,
+		AnyProtocolExtensionBuilder,
+	},
+	WispV2Extensions,
 };
 
-use crate::{CLI, CONFIG};
+use crate::{handle::wisp::utils::get_certificates_from_paths, CLI, CONFIG, RESOLVER};
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+const VERSION_STRING: &str = concat!(
+	"git ",
+	env!("VERGEN_GIT_SHA"),
+	", dirty ",
+	env!("VERGEN_GIT_DIRTY"),
+	" compiled with rustc ",
+	env!("VERGEN_RUSTC_SEMVER"),
+	" on ",
+	env!("VERGEN_RUSTC_HOST_TRIPLE")
+);
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum SocketType {
 	/// TCP socket listener.
 	#[default]
 	Tcp,
+	/// TCP socket listener with TLS.
+	TlsTcp,
 	/// Unix socket listener.
 	Unix,
+	/// Unix socket listener with TLS.
+	TlsUnix,
 	/// File "socket" "listener".
 	/// "Accepts" a "connection" immediately.
 	File,
@@ -38,13 +59,35 @@ pub enum SocketTransport {
 	LengthDelimitedLe,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeFlavor {
+	/// Single-threaded tokio runtime.
+	SingleThread,
+	/// Multi-threaded tokio runtime.
+	#[default]
+	MultiThread,
+	/// Alternate multi-threaded tokio runtime.
+	#[cfg(tokio_unstable)]
+	MultiThreadAlt,
+}
+
+pub type BindAddr = (SocketType, String);
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub enum StatsEndpoint {
+	/// Stats on the same listener as the Wisp server.
+	SameServer(String),
+	/// Stats on this address and socket type.
+	SeparateServer(BindAddr),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-	/// Address to listen on.
-	pub bind: String,
-	/// Socket type to listen on.
-	pub socket: SocketType,
+	/// Address and socket type to listen on.
+	pub bind: BindAddr,
 	/// Transport to listen on.
 	pub transport: SocketTransport,
 	/// Whether or not to resolve and connect to IPV6 upstream addresses.
@@ -53,57 +96,85 @@ pub struct ServerConfig {
 	pub tcp_nodelay: bool,
 	/// Whether or not to set "raw mode" for the file.
 	pub file_raw_mode: bool,
+	/// Keypair (public, private) in PEM format for TLS.
+	pub tls_keypair: Option<[PathBuf; 2]>,
 
-	/// Whether or not to show what upstreams each client is connected to in stats. This can
-	/// heavily increase the size of the stats.
-	pub verbose_stats: bool,
-	/// Whether or not to respond to stats requests over HTTP.
-	pub enable_stats_endpoint: bool,
-	/// Path of stats HTTP endpoint.
-	pub stats_endpoint: String,
+	/// Where to listen for stats requests over HTTP.
+	pub stats_endpoint: Option<StatsEndpoint>,
 
+	/// Whether or not to search for the x-real-ip or x-forwarded-for headers.
+	pub use_real_ip_headers: bool,
 	/// String sent to a request that is not a websocket upgrade request.
 	pub non_ws_response: String,
-
-	/// Prefix of Wisp server. Do NOT add a trailing slash here.
-	pub prefix: String,
 
 	/// Max WebSocket message size that can be recieved.
 	pub max_message_size: usize,
 
 	/// Server log level.
 	pub log_level: LevelFilter,
+	/// Runtime type.
+	pub runtime: RuntimeFlavor,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProtocolExtension {
-	/// Wisp draft version 2 UDP protocol extension.
+	/// Wisp version 2 UDP protocol extension.
 	Udp,
-	/// Wisp draft version 2 password protocol extension.
-	Password,
+	/// Wisp version 2 MOTD protocol extension.
+	Motd,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProtocolExtensionAuth {
+	/// Wisp version 2 password authentication protocol extension.
+	Password,
+	/// Wisp version 2 certificate authentication protocol extension.
+	Certificate,
+}
+
+fn default_motd() -> String {
+	format!("epoxy_server ({})", VERSION_STRING)
+}
+
+fn is_default_motd(str: &String) -> bool {
+	*str == default_motd()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WispConfig {
 	/// Allow legacy wsproxy connections.
 	pub allow_wsproxy: bool,
 	/// Buffer size advertised to the client.
 	pub buffer_size: u32,
+	/// Prefix of Wisp server. Do NOT add a trailing slash here.
+	pub prefix: String,
 
-	/// Whether or not to use Wisp draft version 2.
+	/// Whether or not to use Wisp version 2.
 	pub wisp_v2: bool,
-	/// Wisp draft version 2 extensions advertised.
+	/// Wisp version 2 extensions advertised.
 	pub extensions: Vec<ProtocolExtension>,
-	/// Wisp draft version 2 password extension username/passwords.
+	/// Wisp version 2 authentication extension advertised.
+	pub auth_extension: Option<ProtocolExtensionAuth>,
+
+	#[serde(skip_serializing_if = "HashMap::is_empty")]
+	/// Wisp version 2 password authentication extension username/passwords.
 	pub password_extension_users: HashMap<String, String>,
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	/// Wisp version 2 certificate authentication extension public ed25519 pem keys.
+	pub certificate_extension_keys: Vec<PathBuf>,
+
+	#[serde(skip_serializing_if = "is_default_motd")]
+	/// Wisp version 2 MOTD extension message.
+	pub motd_extension: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StreamConfig {
-	/// Whether or not to enable TCP nodelay on proxied streams.
+	/// Whether or not to enable TCP nodelay.
 	pub tcp_nodelay: bool,
 
 	/// Whether or not to allow Wisp clients to create UDP streams.
@@ -113,6 +184,9 @@ pub struct StreamConfig {
 	/// Whether or not to allow TWisp streams.
 	#[cfg(feature = "twisp")]
 	pub allow_twisp: bool,
+
+	/// DNS servers to resolve with. Will default to system configuration.
+	pub dns_servers: Vec<IpAddr>,
 
 	/// Whether or not to allow connections to IP addresses.
 	pub allow_direct_ip: bool,
@@ -147,7 +221,7 @@ pub struct StreamConfig {
 	pub block_ports: Vec<Vec<u16>>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
 	pub server: ServerConfig,
@@ -155,8 +229,7 @@ pub struct Config {
 	pub stream: StreamConfig,
 }
 
-type AnyProtocolExtensionBuilder = Box<dyn ProtocolExtensionBuilder + Sync + Send>;
-
+#[derive(Debug)]
 struct ConfigCache {
 	pub blocked_ports: Vec<RangeInclusive<u16>>,
 	pub allowed_ports: Vec<RangeInclusive<u16>>,
@@ -199,32 +272,50 @@ lazy_static! {
 	};
 }
 
-pub fn validate_config_cache() {
+pub async fn validate_config_cache() {
+	// constructs regexes
 	let _ = CONFIG_CACHE.allowed_ports;
-	CONFIG.wisp.to_opts().unwrap();
+	// validates wisp config
+	CONFIG.wisp.to_opts().await.unwrap();
+	// constructs resolver
+	RESOLVER.clear_cache();
+}
+
+impl StatsEndpoint {
+	pub fn get_endpoint(&self) -> Option<String> {
+		match self {
+			Self::SameServer(x) => Some(x.clone()),
+			Self::SeparateServer(_) => None,
+		}
+	}
+
+	pub fn get_bindaddr(&self) -> Option<BindAddr> {
+		match self {
+			Self::SameServer(_) => None,
+			Self::SeparateServer(x) => Some(x.clone()),
+		}
+	}
 }
 
 impl Default for ServerConfig {
 	fn default() -> Self {
 		Self {
-			bind: "127.0.0.1:4000".to_string(),
-			socket: SocketType::default(),
+			bind: (SocketType::default(), "127.0.0.1:4000".to_string()),
 			transport: SocketTransport::default(),
 			resolve_ipv6: false,
 			tcp_nodelay: false,
 			file_raw_mode: false,
+			tls_keypair: None,
 
-			verbose_stats: true,
-			stats_endpoint: "/stats".to_string(),
-			enable_stats_endpoint: true,
+			stats_endpoint: None,
 
+			use_real_ip_headers: false,
 			non_ws_response: ":3".to_string(),
-
-			prefix: String::new(),
 
 			max_message_size: 64 * 1024,
 
 			log_level: LevelFilter::Info,
+			runtime: RuntimeFlavor::default(),
 		}
 	}
 }
@@ -234,32 +325,66 @@ impl Default for WispConfig {
 		Self {
 			buffer_size: 128,
 			allow_wsproxy: true,
+			prefix: String::new(),
 
-			wisp_v2: false,
-			extensions: vec![ProtocolExtension::Udp],
+			wisp_v2: true,
+			extensions: vec![ProtocolExtension::Udp, ProtocolExtension::Motd],
+			auth_extension: None,
+
 			password_extension_users: HashMap::new(),
+			certificate_extension_keys: Vec::new(),
+
+			motd_extension: default_motd(),
 		}
 	}
 }
 
 impl WispConfig {
-	pub fn to_opts(&self) -> anyhow::Result<(Option<Vec<AnyProtocolExtensionBuilder>>, u32)> {
+	pub async fn to_opts(&self) -> anyhow::Result<(Option<WispV2Extensions>, Vec<u8>, u32)> {
 		if self.wisp_v2 {
 			let mut extensions: Vec<AnyProtocolExtensionBuilder> = Vec::new();
+			let mut required_extensions: Vec<u8> = Vec::new();
 
 			if self.extensions.contains(&ProtocolExtension::Udp) {
-				extensions.push(Box::new(UdpProtocolExtensionBuilder));
+				extensions.push(AnyProtocolExtensionBuilder::new(
+					UdpProtocolExtensionBuilder,
+				));
 			}
 
-			if self.extensions.contains(&ProtocolExtension::Password) {
-				extensions.push(Box::new(PasswordProtocolExtensionBuilder::new_server(
-					self.password_extension_users.clone(),
-				)));
+			if self.extensions.contains(&ProtocolExtension::Motd) {
+				extensions.push(AnyProtocolExtensionBuilder::new(
+					MotdProtocolExtensionBuilder::Server(self.motd_extension.clone()),
+				));
 			}
 
-			Ok((Some(extensions), self.buffer_size))
+			match self.auth_extension {
+				Some(ProtocolExtensionAuth::Password) => {
+					extensions.push(AnyProtocolExtensionBuilder::new(
+						PasswordProtocolExtensionBuilder::new_server(
+							self.password_extension_users.clone(),
+						),
+					));
+					required_extensions.push(PasswordProtocolExtension::ID);
+				}
+				Some(ProtocolExtensionAuth::Certificate) => {
+					extensions.push(AnyProtocolExtensionBuilder::new(
+						CertAuthProtocolExtensionBuilder::new_server(
+							get_certificates_from_paths(self.certificate_extension_keys.clone())
+								.await?,
+						),
+					));
+					required_extensions.push(CertAuthProtocolExtension::ID);
+				}
+				None => {}
+			}
+
+			Ok((
+				Some(WispV2Extensions::new(extensions)),
+				required_extensions,
+				self.buffer_size,
+			))
 		} else {
-			Ok((None, self.buffer_size))
+			Ok((None, Vec::new(), self.buffer_size))
 		}
 	}
 }
@@ -273,6 +398,8 @@ impl Default for StreamConfig {
 			allow_wsproxy_udp: false,
 			#[cfg(feature = "twisp")]
 			allow_twisp: false,
+
+			dns_servers: Vec::new(),
 
 			allow_direct_ip: true,
 			allow_loopback: true,
@@ -333,41 +460,32 @@ impl StreamConfig {
 impl Config {
 	pub fn ser(&self) -> anyhow::Result<String> {
 		Ok(match CLI.format {
+			ConfigFormat::Json => serde_json::to_string_pretty(self)?,
 			#[cfg(feature = "toml")]
 			ConfigFormat::Toml => toml::to_string_pretty(self)?,
-			#[cfg(feature = "json")]
-			ConfigFormat::Json => serde_json::to_string_pretty(self)?,
 			#[cfg(feature = "yaml")]
 			ConfigFormat::Yaml => serde_yaml::to_string(self)?,
-			#[cfg(not(any(feature = "toml", feature = "json", feature = "yaml")))]
-			ConfigFormat::None => String::new(),
 		})
 	}
 
 	pub fn de(string: String) -> anyhow::Result<Self> {
 		Ok(match CLI.format {
+			ConfigFormat::Json => serde_json::from_str(&string)?,
 			#[cfg(feature = "toml")]
 			ConfigFormat::Toml => toml::from_str(&string)?,
-			#[cfg(feature = "json")]
-			ConfigFormat::Json => serde_json::from_str(&string)?,
 			#[cfg(feature = "yaml")]
 			ConfigFormat::Yaml => serde_yaml::from_str(&string)?,
-			#[cfg(not(any(feature = "toml", feature = "json", feature = "yaml")))]
-			ConfigFormat::None => { let _ = string; Self::default() },
 		})
 	}
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 pub enum ConfigFormat {
+	Json,
 	#[cfg(feature = "toml")]
 	Toml,
-	#[cfg(feature = "json")]
-	Json,
 	#[cfg(feature = "yaml")]
 	Yaml,
-	#[cfg(not(any(feature = "toml", feature = "json", feature = "yaml")))]
-	None,
 }
 
 impl Default for ConfigFormat {
@@ -375,21 +493,18 @@ impl Default for ConfigFormat {
 		cfg_if! {
 			if #[cfg(feature = "toml")] {
 				Self::Toml
-			} else if #[cfg(feature = "json")] {
-				Self::Json
 			} else if #[cfg(feature = "yaml")] {
 				Self::Yaml
 			} else {
-				compile_error!("no config format feature enabled!");
-				Self::None
+				Self::Json
 			}
 		}
 	}
 }
 
 /// Performant server implementation of the Wisp protocol in Rust, made for epoxy.
-#[derive(Parser)]
-#[command(version = clap::crate_version!())]
+#[derive(Parser, Debug)]
+#[command(version = VERSION_STRING)]
 pub struct Cli {
 	/// Config file to use.
 	pub config: Option<PathBuf>,

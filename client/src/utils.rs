@@ -6,12 +6,21 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::{buf::UninitSlice, BufMut, Bytes, BytesMut};
-use futures_rustls::TlsStream;
+use futures_rustls::{
+	rustls::{
+		self,
+		client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+		crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
+		DigitallySignedStruct, SignatureScheme,
+	},
+	TlsStream,
+};
 use futures_util::{ready, AsyncRead, AsyncWrite, Future, Stream, StreamExt, TryStreamExt};
 use http::{HeaderValue, Uri};
 use hyper::{body::Body, rt::Executor};
 use js_sys::{Array, ArrayBuffer, JsString, Object, Uint8Array};
 use pin_project_lite::pin_project;
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use send_wrapper::SendWrapper;
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -87,20 +96,15 @@ impl IncomingBody {
 impl Stream for IncomingBody {
 	type Item = std::io::Result<Bytes>;
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		let this = self.project();
-		let ret = this.incoming.poll_frame(cx);
-		match ret {
-			Poll::Ready(item) => Poll::<Option<Self::Item>>::Ready(match item {
-				Some(frame) => frame
-					.map(|x| {
-						x.into_data()
-							.map_err(|_| std::io::Error::other("not data frame"))
+		self.project().incoming.poll_frame(cx).map(|x| {
+			x.map(|x| {
+				x.map_err(std::io::Error::other).and_then(|x| {
+					x.into_data().map_err(|_| {
+						std::io::Error::other("trailer frame recieved; not implemented")
 					})
-					.ok(),
-				None => None,
-			}),
-			Poll::Pending => Poll::<Option<Self::Item>>::Pending,
-		}
+				})
+			})
+		})
 	}
 }
 
@@ -305,6 +309,60 @@ impl AsyncWrite for IgnoreCloseNotify {
 	}
 }
 
+#[derive(Debug)]
+pub struct NoCertificateVerification(CryptoProvider);
+
+impl NoCertificateVerification {
+	pub fn new(provider: CryptoProvider) -> Self {
+		Self(provider)
+	}
+}
+
+impl ServerCertVerifier for NoCertificateVerification {
+	fn verify_server_cert(
+		&self,
+		_end_entity: &CertificateDer<'_>,
+		_intermediates: &[CertificateDer<'_>],
+		_server_name: &ServerName<'_>,
+		_ocsp: &[u8],
+		_now: UnixTime,
+	) -> Result<ServerCertVerified, rustls::Error> {
+		Ok(ServerCertVerified::assertion())
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &DigitallySignedStruct,
+	) -> Result<HandshakeSignatureValid, rustls::Error> {
+		verify_tls12_signature(
+			message,
+			cert,
+			dss,
+			&self.0.signature_verification_algorithms,
+		)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &DigitallySignedStruct,
+	) -> Result<HandshakeSignatureValid, rustls::Error> {
+		verify_tls13_signature(
+			message,
+			cert,
+			dss,
+			&self.0.signature_verification_algorithms,
+		)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+		self.0.signature_verification_algorithms.supported_schemes()
+	}
+}
+
 pub fn is_redirect(code: u16) -> bool {
 	[301, 302, 303, 307, 308].contains(&code)
 }
@@ -317,7 +375,7 @@ pub fn is_null_body(code: u16) -> bool {
 export function object_get(obj, k) { 
 	try {
 		return obj[k]
-	} catch {
+	} catch(x) {
 		return undefined
 	}
 };
@@ -344,6 +402,12 @@ export function ws_key() {
 	crypto.getRandomValues(key);
 	return btoa(Array.from(key).map(String.fromCharCode).join(''));
 }
+
+export function from_entries(entries){
+    var ret = {};
+    for(var i = 0; i < entries.length; i++) ret[entries[i][0]] = entries[i][1];
+    return ret;
+}
 "#)]
 extern "C" {
 	pub fn object_get(obj: &Object, key: &str) -> JsValue;
@@ -355,6 +419,9 @@ extern "C" {
 	fn entries_of_object_inner(obj: &Object) -> Vec<Array>;
 	pub fn define_property(obj: &Object, key: &str, val: JsValue);
 	pub fn ws_key() -> String;
+
+	#[wasm_bindgen(catch)]
+	pub fn from_entries(iterable: &JsValue) -> Result<Object, JsValue>;
 }
 
 pub async fn convert_body(val: JsValue) -> Result<(Uint8Array, Option<String>), JsValue> {

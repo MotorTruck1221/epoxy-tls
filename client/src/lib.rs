@@ -9,7 +9,10 @@ use cfg_if::cfg_if;
 use futures_util::future::Either;
 use futures_util::TryStreamExt;
 use http::{
-	header::{InvalidHeaderName, InvalidHeaderValue},
+	header::{
+		InvalidHeaderName, InvalidHeaderValue, ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH,
+		CONTENT_TYPE, HOST, USER_AGENT,
+	},
 	method::InvalidMethod,
 	uri::{InvalidUri, InvalidUriParts},
 	HeaderName, HeaderValue, Method, Request, Response,
@@ -23,9 +26,9 @@ use send_wrapper::SendWrapper;
 use stream_provider::{StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
-	asyncread_to_readablestream_stream, convert_body, entries_of_object, is_null_body, is_redirect,
-	object_get, object_set, object_truthy, IncomingBody, UriExt, WasmExecutor, WispTransportRead,
-	WispTransportWrite,
+	asyncread_to_readablestream_stream, convert_body, entries_of_object, from_entries,
+	is_null_body, is_redirect, object_get, object_set, object_truthy, IncomingBody, UriExt,
+	WasmExecutor, WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -71,14 +74,14 @@ pub enum EpoxyError {
 	#[error("HTTP ToStr: {0:?} ({0})")]
 	ToStr(#[from] http::header::ToStrError),
 	#[cfg(feature = "full")]
-	#[error("Fastwebsockets: {0:?} ({0})")]
-	FastWebSockets(#[from] fastwebsockets::WebSocketError),
-	#[cfg(feature = "full")]
 	#[error("Pemfile: {0:?} ({0})")]
 	Pemfile(std::io::Error),
 	#[cfg(feature = "full")]
 	#[error("Webpki: {0:?} ({0})")]
 	Webpki(#[from] webpki::Error),
+
+	#[error("Wisp WebSocket failed to connect")]
+	WebSocketConnectFailed,
 
 	#[error("Custom wisp transport: {0}")]
 	WispTransport(String),
@@ -88,6 +91,22 @@ pub enum EpoxyError {
 	InvalidWispTransportPacket,
 	#[error("Wisp transport already closed")]
 	WispTransportClosed,
+
+	#[cfg(feature = "full")]
+	#[error("Fastwebsockets: {0:?} ({0})")]
+	FastWebSockets(#[from] fastwebsockets::WebSocketError),
+	#[cfg(feature = "full")]
+	#[error("Invalid websocket response status code: {0} != {1}")]
+	WsInvalidStatusCode(u16, u16),
+	#[cfg(feature = "full")]
+	#[error("Invalid websocket upgrade header: {0:?} != \"websocket\"")]
+	WsInvalidUpgradeHeader(String),
+	#[cfg(feature = "full")]
+	#[error("Invalid websocket connection header: {0:?} != \"Upgrade\"")]
+	WsInvalidConnectionHeader(String),
+	#[cfg(feature = "full")]
+	#[error("Invalid websocket payload, only String/ArrayBuffer accepted")]
+	WsInvalidPayload,
 
 	#[error("Invalid URL scheme")]
 	InvalidUrlScheme,
@@ -99,22 +118,8 @@ pub enum EpoxyError {
 	InvalidRequestBody,
 	#[error("Invalid request")]
 	InvalidRequest,
-	#[error("Invalid websocket response status code")]
-	WsInvalidStatusCode,
-	#[error("Invalid websocket upgrade header")]
-	WsInvalidUpgradeHeader,
-	#[error("Invalid websocket connection header")]
-	WsInvalidConnectionHeader,
-	#[error("Invalid websocket payload")]
-	WsInvalidPayload,
 	#[error("Invalid payload")]
 	InvalidPayload,
-
-	#[error("Invalid certificate store")]
-	InvalidCertStore,
-	#[error("WebSocket failed to connect")]
-	WebSocketConnectFailed,
-
 	#[error("Failed to construct response headers object")]
 	ResponseHeadersFromEntriesFailed,
 	#[error("Failed to construct response object")]
@@ -185,18 +190,37 @@ enum EpoxyCompression {
 	Gzip,
 }
 
-#[wasm_bindgen]
-pub struct EpoxyClientOptions {
-	pub wisp_v2: bool,
-	pub udp_extension_required: bool,
-	#[wasm_bindgen(getter_with_clone)]
-	pub websocket_protocols: Vec<String>,
-	pub redirect_limit: usize,
-	#[wasm_bindgen(getter_with_clone)]
-	pub user_agent: String,
-	#[cfg(feature = "full")]
-	#[wasm_bindgen(getter_with_clone)]
-	pub pem_files: Vec<String>,
+// ugly hack. switch to serde-wasm-bindgen or a knockoff
+cfg_if! {
+	if #[cfg(feature = "full")] {
+		#[wasm_bindgen]
+		pub struct EpoxyClientOptions {
+			pub wisp_v2: bool,
+			pub udp_extension_required: bool,
+			pub title_case_headers: bool,
+			#[wasm_bindgen(getter_with_clone)]
+			pub websocket_protocols: Vec<String>,
+			pub redirect_limit: usize,
+			#[wasm_bindgen(getter_with_clone)]
+			pub user_agent: String,
+			#[wasm_bindgen(getter_with_clone)]
+			pub pem_files: Vec<String>,
+			pub disable_certificate_validation: bool,
+		}
+	} else {
+		#[wasm_bindgen]
+		pub struct EpoxyClientOptions {
+			pub wisp_v2: bool,
+			pub udp_extension_required: bool,
+			pub title_case_headers: bool,
+			#[wasm_bindgen(getter_with_clone)]
+			pub websocket_protocols: Vec<String>,
+			pub redirect_limit: usize,
+			#[wasm_bindgen(getter_with_clone)]
+			pub user_agent: String,
+			pub disable_certificate_validation: bool,
+		}
+	}
 }
 
 #[wasm_bindgen]
@@ -212,11 +236,13 @@ impl Default for EpoxyClientOptions {
 		Self {
             wisp_v2: false,
             udp_extension_required: false,
+			title_case_headers: false,
             websocket_protocols: Vec::new(),
             redirect_limit: 10,
             user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36".to_string(),
 			#[cfg(feature = "full")]
 			pem_files: Vec::new(),
+			disable_certificate_validation: false,
         }
 	}
 }
@@ -338,8 +364,7 @@ impl EpoxyClient {
 		let service = StreamProviderService(stream_provider.clone());
 		let client = Client::builder(WasmExecutor)
 			.http09_responses(true)
-			.http1_title_case_headers(true)
-			.http1_preserve_header_case(true)
+			.http1_title_case_headers(options.title_case_headers)
 			.http1_max_headers(200)
 			.build(service);
 
@@ -349,9 +374,9 @@ impl EpoxyClient {
 			redirect_limit: options.redirect_limit,
 			user_agent: options.user_agent,
 			#[cfg(feature = "full")]
-			certs_tampered: !options.pem_files.is_empty(),
+			certs_tampered: options.disable_certificate_validation || !options.pem_files.is_empty(),
 			#[cfg(not(feature = "full"))]
-			certs_tampered: false,
+			certs_tampered: options.disable_certificate_validation,
 		})
 	}
 
@@ -511,6 +536,10 @@ impl EpoxyClient {
 		url.scheme().ok_or(EpoxyError::InvalidUrlScheme)?;
 
 		let host = url.host().ok_or(EpoxyError::NoUrlHost)?;
+		let port_str = url
+			.port_u16()
+			.map(|x| format!(":{}", x))
+			.unwrap_or_default();
 
 		let request_method = object_get(&options, "method")
 			.as_string()
@@ -539,7 +568,7 @@ impl EpoxyClient {
 
 		let headers = object_truthy(object_get(&options, "headers")).and_then(|val| {
 			if web_sys::Headers::instanceof(&val) {
-				Some(entries_of_object(&Object::from_entries(&val).ok()?))
+				Some(entries_of_object(&from_entries(&val).ok()?))
 			} else if val.is_truthy() {
 				Some(entries_of_object(&Object::from(val)))
 			} else {
@@ -547,7 +576,9 @@ impl EpoxyClient {
 			}
 		});
 
-		let mut request_builder = Request::builder().uri(url.clone()).method(request_method);
+		let mut request_builder = Request::builder()
+			.uri(url.clone())
+			.method(request_method.clone());
 
 		// Generic InvalidRequest because this only returns None if the builder has some error
 		// which we don't know
@@ -557,21 +588,20 @@ impl EpoxyClient {
 
 		cfg_if! {
 			if #[cfg(feature = "full")] {
-				headers_map.insert("Accept-Encoding", HeaderValue::from_static("gzip, br"));
+				headers_map.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br"));
 			} else {
-				headers_map.insert("Accept-Encoding", HeaderValue::from_static("identity"));
+				headers_map.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
 			}
 		}
-		headers_map.insert("Connection", HeaderValue::from_static("keep-alive"));
-		headers_map.insert("User-Agent", HeaderValue::from_str(&self.user_agent)?);
-		headers_map.insert("Host", HeaderValue::from_str(host)?);
-
-		if body.is_empty() {
-			headers_map.insert("Content-Length", HeaderValue::from_static("0"));
-		}
+		headers_map.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+		headers_map.insert(USER_AGENT, HeaderValue::from_str(&self.user_agent)?);
+		headers_map.insert(
+			HOST,
+			HeaderValue::from_str(&format!("{}{}", host, port_str))?,
+		);
 
 		if let Some(content_type) = body_content_type {
-			headers_map.insert("Content-Type", HeaderValue::from_str(&content_type)?);
+			headers_map.insert(CONTENT_TYPE, HeaderValue::from_str(&content_type)?);
 		}
 
 		if let Some(headers) = headers {
@@ -583,15 +613,18 @@ impl EpoxyClient {
 			}
 		}
 
+		if matches!(request_method, Method::POST | Method::PUT | Method::PATCH) && body.is_empty() {
+			headers_map.insert(CONTENT_LENGTH, 0.into());
+		}
+
 		let (mut response, response_uri, redirected) = self
 			.send_req(request_builder.body(HttpBody::new(body))?, request_redirect)
 			.await?;
 
 		if self.certs_tampered {
-			response.headers_mut().insert(
-				HeaderName::from_static("X-Epoxy-CertsTampered"),
-				HeaderValue::from_static("true"),
-			);
+			response
+				.headers_mut()
+				.insert("X-Epoxy-CertsTampered", HeaderValue::from_static("true"));
 		}
 
 		let response_headers: Array = response
@@ -604,7 +637,7 @@ impl EpoxyClient {
 				))
 			})
 			.collect();
-		let response_headers = Object::from_entries(&response_headers)
+		let response_headers = from_entries(&response_headers)
 			.map_err(|_| EpoxyError::ResponseHeadersFromEntriesFailed)?;
 
 		let response_headers_raw = response.headers().clone();
@@ -671,11 +704,11 @@ impl EpoxyClient {
 			if jv.is_array() {
 				let arr = Array::from(&jv);
 				arr.push(&v);
-				object_set(&raw_headers, &k, arr.into());
+				object_set(&raw_headers, k, arr.into());
 			} else if jv.is_truthy() {
-				object_set(&raw_headers, &k, Array::of2(&jv, &v).into());
+				object_set(&raw_headers, k, Array::of2(&jv, &v).into());
 			} else {
-				object_set(&raw_headers, &k, v);
+				object_set(&raw_headers, k, v);
 			}
 		}
 		utils::define_property(&resp, "rawHeaders", raw_headers.into());

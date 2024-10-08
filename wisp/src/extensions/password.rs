@@ -2,36 +2,9 @@
 //!
 //! Passwords are sent in plain text!!
 //!
-//! # Example
-//! Server:
-//! ```
-//! let mut passwords = HashMap::new();
-//! passwords.insert("user1".to_string(), "pw".to_string());
-//! let (mux, fut) = ServerMux::new(
-//!     rx,
-//!     tx,
-//!     128,
-//!     Some(&[Box::new(PasswordProtocolExtensionBuilder::new_server(passwords))])
-//! );
-//! ```
-//!
-//! Client:
-//! ```
-//! let (mux, fut) = ClientMux::new(
-//!     rx,
-//!     tx,
-//!     128,
-//!     Some(&[
-//!          Box::new(PasswordProtocolExtensionBuilder::new_client(
-//!             "user1".to_string(),
-//!             "pw".to_string()
-//!         ))
-//!     ])
-//! );
-//! ```
 //! See [the docs](https://github.com/MercuryWorkshop/wisp-protocol/blob/v2/protocol.md#0x02---password-authentication)
 
-use std::{collections::HashMap, error::Error, fmt::Display, string::FromUtf8Error};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -99,6 +72,10 @@ impl ProtocolExtension for PasswordProtocolExtension {
 		&[]
 	}
 
+	fn get_congestion_stream_types(&self) -> &'static [u8] {
+		&[]
+	}
+
 	fn encode(&self) -> Bytes {
 		match self.role {
 			Role::Server => Bytes::new(),
@@ -138,38 +115,6 @@ impl ProtocolExtension for PasswordProtocolExtension {
 
 	fn box_clone(&self) -> Box<dyn ProtocolExtension + Sync + Send> {
 		Box::new(self.clone())
-	}
-}
-
-#[derive(Debug)]
-enum PasswordProtocolExtensionError {
-	Utf8Error(FromUtf8Error),
-	InvalidUsername,
-	InvalidPassword,
-}
-
-impl Display for PasswordProtocolExtensionError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		use PasswordProtocolExtensionError as E;
-		match self {
-			E::Utf8Error(e) => write!(f, "{}", e),
-			E::InvalidUsername => write!(f, "Invalid username"),
-			E::InvalidPassword => write!(f, "Invalid password"),
-		}
-	}
-}
-
-impl Error for PasswordProtocolExtensionError {}
-
-impl From<PasswordProtocolExtensionError> for WispError {
-	fn from(value: PasswordProtocolExtensionError) -> Self {
-		WispError::ExtensionImplError(Box::new(value))
-	}
-}
-
-impl From<FromUtf8Error> for PasswordProtocolExtensionError {
-	fn from(value: FromUtf8Error) -> Self {
-		PasswordProtocolExtensionError::Utf8Error(value)
 	}
 }
 
@@ -219,7 +164,7 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 	}
 
 	fn build_from_bytes(
-		&self,
+		&mut self,
 		mut payload: Bytes,
 		role: crate::Role,
 	) -> Result<AnyProtocolExtension, WispError> {
@@ -235,20 +180,17 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 					return Err(WispError::PacketTooSmall);
 				}
 
-				use PasswordProtocolExtensionError as EError;
 				let username =
-					String::from_utf8(payload.copy_to_bytes(username_len as usize).to_vec())
-						.map_err(|x| WispError::from(EError::from(x)))?;
+					std::str::from_utf8(&payload.split_to(username_len as usize))?.to_string();
 				let password =
-					String::from_utf8(payload.copy_to_bytes(password_len as usize).to_vec())
-						.map_err(|x| WispError::from(EError::from(x)))?;
+					std::str::from_utf8(&payload.split_to(password_len as usize))?.to_string();
 
 				let Some(user) = self.users.iter().find(|x| *x.0 == username) else {
-					return Err(EError::InvalidUsername.into());
+					return Err(WispError::PasswordExtensionCredsInvalid);
 				};
 
 				if *user.1 != password {
-					return Err(EError::InvalidPassword.into());
+					return Err(WispError::PasswordExtensionCredsInvalid);
 				}
 
 				Ok(PasswordProtocolExtension {
@@ -264,13 +206,13 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 		}
 	}
 
-	fn build_to_extension(&self, role: Role) -> AnyProtocolExtension {
-		match role {
+	fn build_to_extension(&mut self, role: Role) -> Result<AnyProtocolExtension, WispError> {
+		Ok(match role {
 			Role::Server => PasswordProtocolExtension::new_server(),
 			Role::Client => {
 				PasswordProtocolExtension::new_client(self.username.clone(), self.password.clone())
 			}
 		}
-		.into()
+		.into())
 	}
 }

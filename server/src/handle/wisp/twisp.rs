@@ -10,7 +10,10 @@ use pty_process::{Pty, Size};
 use tokio::{io::copy, process::Child, select, sync::Mutex};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use wisp_mux::{
-	extensions::{AnyProtocolExtension, ProtocolExtension, ProtocolExtensionBuilder},
+	extensions::{
+		AnyProtocolExtension, AnyProtocolExtensionBuilder, ProtocolExtension,
+		ProtocolExtensionBuilder,
+	},
 	ws::{LockedWebSocketWrite, WebSocketRead},
 	MuxStreamAsyncRead, MuxStreamAsyncWrite, WispError,
 };
@@ -35,6 +38,10 @@ impl ProtocolExtension for TWispServerProtocolExtension {
 	fn get_supported_packets(&self) -> &'static [u8] {
 		// Resize PTY
 		&[0xF0]
+	}
+
+	fn get_congestion_stream_types(&self) -> &'static [u8] {
+		&[0x03]
 	}
 
 	fn encode(&self) -> Bytes {
@@ -87,15 +94,15 @@ impl ProtocolExtensionBuilder for TWispServerProtocolExtensionBuilder {
 	}
 
 	fn build_from_bytes(
-		&self,
+		&mut self,
 		_: Bytes,
 		_: wisp_mux::Role,
 	) -> std::result::Result<AnyProtocolExtension, WispError> {
 		Ok(TWispServerProtocolExtension(self.0.clone()).into())
 	}
 
-	fn build_to_extension(&self, _: wisp_mux::Role) -> AnyProtocolExtension {
-		TWispServerProtocolExtension(self.0.clone()).into()
+	fn build_to_extension(&mut self, _: wisp_mux::Role) -> Result<AnyProtocolExtension, WispError> {
+		Ok(TWispServerProtocolExtension(self.0.clone()).into())
 	}
 }
 
@@ -116,8 +123,8 @@ pub fn new_map() -> TwispMap {
 	Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn new_ext(map: TwispMap) -> Box<dyn ProtocolExtensionBuilder + Send + Sync> {
-	Box::new(TWispServerProtocolExtensionBuilder(map))
+pub fn new_ext(map: TwispMap) -> AnyProtocolExtensionBuilder {
+	AnyProtocolExtensionBuilder::new(TWispServerProtocolExtensionBuilder(map))
 }
 
 pub async fn handle_twisp(

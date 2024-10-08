@@ -1,13 +1,8 @@
-use std::{
-	io::{ErrorKind},
-	pin::Pin,
-	sync::Arc,
-	task::Poll,
-};
+use std::{io::ErrorKind, pin::Pin, sync::Arc, task::Poll};
 
 use cfg_if::cfg_if;
 use futures_rustls::{
-	rustls::{ClientConfig, RootCertStore},
+	rustls::{crypto::ring::default_provider, ClientConfig, RootCertStore},
 	TlsConnector,
 };
 use futures_util::{
@@ -20,12 +15,16 @@ use pin_project_lite::pin_project;
 use wasm_bindgen_futures::spawn_local;
 use webpki_roots::TLS_SERVER_ROOTS;
 use wisp_mux::{
-	extensions::{udp::UdpProtocolExtensionBuilder, ProtocolExtensionBuilder},
+	extensions::{udp::UdpProtocolExtensionBuilder, AnyProtocolExtensionBuilder},
 	ws::{WebSocketRead, WebSocketWrite},
-	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType,
+	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType, WispV2Extensions,
 };
 
-use crate::{console_log, utils::IgnoreCloseNotify, EpoxyClientOptions, EpoxyError};
+use crate::{
+	console_log,
+	utils::{IgnoreCloseNotify, NoCertificateVerification},
+	EpoxyClientOptions, EpoxyError,
+};
 
 pub type ProviderUnencryptedStream = MuxStreamIo;
 pub type ProviderUnencryptedAsyncRW = MuxStreamAsyncRW;
@@ -65,27 +64,33 @@ impl StreamProvider {
 		wisp_generator: ProviderWispTransportGenerator,
 		options: &EpoxyClientOptions,
 	) -> Result<Self, EpoxyError> {
-		cfg_if! {
-			if #[cfg(feature = "full")] {
-				let pems: Result<Result<Vec<_>, webpki::Error>, std::io::Error> = options
-					.pem_files
-					.iter()
-					.flat_map(|x| {
-						rustls_pemfile::certs(&mut std::io::BufReader::new(x.as_bytes()))
-							.map(|x| x.map(|x| webpki::anchor_from_trusted_cert(&x).map(|x| x.to_owned())))
-							.collect::<Vec<_>>()
-					})
-					.collect();
-				let pems = pems.map_err(EpoxyError::Pemfile)??;
-				let certstore = RootCertStore::from_iter(pems.into_iter().chain(TLS_SERVER_ROOTS.iter().cloned()));
-			} else {
-				let certstore = RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned());
+		let client_config = if options.disable_certificate_validation {
+			ClientConfig::builder()
+				.dangerous()
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new(
+					default_provider(),
+				)))
+		} else {
+			cfg_if! {
+				if #[cfg(feature = "full")] {
+					let pems: Result<Result<Vec<_>, webpki::Error>, std::io::Error> = options
+						.pem_files
+						.iter()
+						.flat_map(|x| {
+							rustls_pemfile::certs(&mut std::io::BufReader::new(x.as_bytes()))
+								.map(|x| x.map(|x| webpki::anchor_from_trusted_cert(&x).map(|x| x.to_owned())))
+								.collect::<Vec<_>>()
+						})
+						.collect();
+					let pems = pems.map_err(EpoxyError::Pemfile)??;
+					let certstore = RootCertStore::from_iter(pems.into_iter().chain(TLS_SERVER_ROOTS.iter().cloned()));
+				} else {
+					let certstore = RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned());
+				}
 			}
+			ClientConfig::builder().with_root_certificates(certstore)
 		}
-
-		let client_config = ClientConfig::builder()
-			.with_root_certificates(certstore)
-			.with_no_client_auth();
+		.with_no_client_auth();
 		let client_config = Arc::new(client_config);
 
 		Ok(Self {
@@ -101,10 +106,12 @@ impl StreamProvider {
 		&self,
 		mut locked: MutexGuard<'_, Option<ClientMux>>,
 	) -> Result<(), EpoxyError> {
-		let extensions_vec: Vec<Box<dyn ProtocolExtensionBuilder + Send + Sync>> =
-			vec![Box::new(UdpProtocolExtensionBuilder)];
+		let extensions_vec: Vec<AnyProtocolExtensionBuilder> =
+			vec![AnyProtocolExtensionBuilder::new(
+				UdpProtocolExtensionBuilder,
+			)];
 		let extensions = if self.wisp_v2 {
-			Some(extensions_vec.as_slice())
+			Some(WispV2Extensions::new(extensions_vec))
 		} else {
 			None
 		};

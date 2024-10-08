@@ -1,6 +1,7 @@
 use atomic_counter::{AtomicCounter, RelaxedCounter};
 use bytes::Bytes;
 use clap::Parser;
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 use fastwebsockets::handshake;
 use futures::future::select_all;
 use http_body_util::Empty;
@@ -10,12 +11,14 @@ use hyper::{
 	Request, Uri,
 };
 use hyper_util::rt::TokioIo;
+use sha2::{Digest, Sha512};
 use simple_moving_average::{SingleSumSMA, SMA};
 use std::{
 	error::Error,
 	future::Future,
 	io::{stdout, Cursor, IsTerminal, Write},
 	net::SocketAddr,
+	path::PathBuf,
 	process::{abort, exit},
 	sync::Arc,
 	time::{Duration, Instant},
@@ -29,11 +32,13 @@ use tokio::{
 };
 use wisp_mux::{
 	extensions::{
+		cert::{CertAuthProtocolExtension, CertAuthProtocolExtensionBuilder, SigningKey},
+		motd::{MotdProtocolExtension, MotdProtocolExtensionBuilder},
 		password::{PasswordProtocolExtension, PasswordProtocolExtensionBuilder},
 		udp::{UdpProtocolExtension, UdpProtocolExtensionBuilder},
-		ProtocolExtensionBuilder,
+		AnyProtocolExtensionBuilder,
 	},
-	ClientMux, StreamType, WispError,
+	ClientMux, StreamType, WispError, WispV2Extensions,
 };
 
 #[derive(Debug)]
@@ -92,9 +97,26 @@ struct Cli {
 	/// Usernames and passwords are sent in plaintext!!
 	#[arg(long)]
 	auth: Option<String>,
+	/// Enable certauth
+	#[arg(long)]
+	certauth: Option<PathBuf>,
+	/// Enable motd parsing
+	#[arg(long)]
+	motd: bool,
 	/// Make a Wisp V2 connection
 	#[arg(long)]
 	wisp_v2: bool,
+}
+
+async fn get_cert(path: PathBuf) -> Result<SigningKey, Box<dyn Error + Sync + Send>> {
+	let data = tokio::fs::read_to_string(path).await?;
+	let signer = ed25519_dalek::SigningKey::from_pkcs8_pem(&data)?;
+	let binary_key = signer.verifying_key().to_bytes();
+
+	let mut hasher = Sha512::new();
+	hasher.update(binary_key);
+	let hash: [u8; 64] = hasher.finalize().into();
+	Ok(SigningKey::new_ed25519(Arc::new(signer), hash))
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -147,15 +169,28 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		(Cursor::new(parts.read_buf).chain(r), w)
 	});
 
-	let mut extensions: Vec<Box<(dyn ProtocolExtensionBuilder + Send + Sync)>> = Vec::new();
+	let mut extensions: Vec<AnyProtocolExtensionBuilder> = Vec::new();
 	let mut extension_ids: Vec<u8> = Vec::new();
 	if opts.udp {
-		extensions.push(Box::new(UdpProtocolExtensionBuilder));
+		extensions.push(AnyProtocolExtensionBuilder::new(
+			UdpProtocolExtensionBuilder,
+		));
 		extension_ids.push(UdpProtocolExtension::ID);
 	}
+	if opts.motd {
+		extensions.push(AnyProtocolExtensionBuilder::new(
+			MotdProtocolExtensionBuilder::Client,
+		));
+	}
 	if let Some(auth) = auth {
-		extensions.push(Box::new(auth));
+		extensions.push(AnyProtocolExtensionBuilder::new(auth));
 		extension_ids.push(PasswordProtocolExtension::ID);
+	}
+	if let Some(certauth) = opts.certauth {
+		let key = get_cert(certauth).await?;
+		let extension = CertAuthProtocolExtensionBuilder::new_client(key);
+		extensions.push(AnyProtocolExtensionBuilder::new(extension));
+		extension_ids.push(CertAuthProtocolExtension::ID);
 	}
 
 	let (mux, fut) = if !opts.wisp_v2 {
@@ -163,15 +198,25 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			.await?
 			.with_no_required_extensions()
 	} else {
-		ClientMux::create(rx, tx, Some(extensions.as_slice()))
+		ClientMux::create(rx, tx, Some(WispV2Extensions::new(extensions)))
 			.await?
 			.with_required_extensions(extension_ids.as_slice())
 			.await?
 	};
 
+	let motd_extension = mux
+		.supported_extensions
+		.iter()
+		.find_map(|x| x.downcast_ref::<MotdProtocolExtension>());
+
 	println!(
-		"connected and created ClientMux, was downgraded {}, extensions supported {:?}\n",
-		mux.downgraded, mux.supported_extension_ids
+		"connected and created ClientMux, was downgraded {}, extensions supported {:?}, motd {:?}\n\n",
+		mux.downgraded,
+		mux.supported_extensions
+			.iter()
+			.map(|x| x.get_id())
+			.collect::<Vec<_>>(),
+		motd_extension.map(|x| x.motd.clone())
 	);
 
 	let mut threads = Vec::with_capacity((opts.streams * 2) + 3);
