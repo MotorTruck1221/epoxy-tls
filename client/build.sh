@@ -30,7 +30,7 @@ else
 fi
 
 mv out/epoxy_client_bg.wasm out/epoxy_client_unoptimized.wasm
-wasm-opt --signext-lowering out/epoxy_client_unoptimized.wasm -o out/epoxy_client_lowered.wasm
+wasm-opt $WASMOPTFLAGS --signext-lowering out/epoxy_client_unoptimized.wasm -o out/epoxy_client_lowered.wasm
 
 if [ "${RELEASE:-0}" = "1" ]; then
 	(

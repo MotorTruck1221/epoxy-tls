@@ -424,10 +424,16 @@ impl EpoxyClient {
 		};
 
 		let service = StreamProviderService(stream_provider.clone());
-		let client = Client::builder(WasmExecutor)
+		let mut builder = Client::builder(WasmExecutor);
+		builder
 			.http09_responses(true)
 			.http1_title_case_headers(options.title_case_headers)
-			.http1_max_headers(options.header_limit)
+			.http1_max_headers(options.header_limit);
+
+		#[cfg(feature = "full")]
+		builder
+			.http2_max_concurrent_reset_streams(10); // set back to default, on wasm it is 0
+		let client = builder
 			.build(service);
 
 		Ok(Self {
