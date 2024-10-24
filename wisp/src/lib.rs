@@ -27,9 +27,9 @@ pub const WISP_VERSION: WispVersion = WispVersion { major: 2, minor: 0 };
 /// The role of the multiplexor.
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Role {
-	/// Client side, can create new channels to proxy.
+	/// Client side, can create new streams.
 	Client,
-	/// Server side, can listen for channels to proxy.
+	/// Server side, can listen for streams created by the client.
 	Server,
 }
 

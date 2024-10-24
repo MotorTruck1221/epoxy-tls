@@ -2,15 +2,15 @@ mod client;
 mod server;
 use std::{future::Future, pin::Pin, time::Duration};
 
-pub use client::{ClientMux, ClientMuxResult};
+pub use client::ClientMux;
 use futures::{select, FutureExt};
 use futures_timer::Delay;
-pub use server::{ServerMux, ServerMuxResult};
+pub use server::ServerMux;
 
 use crate::{
-	extensions::{AnyProtocolExtension, AnyProtocolExtensionBuilder},
+	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension, AnyProtocolExtensionBuilder},
 	ws::{Frame, LockedWebSocketWrite, WebSocketRead},
-	Packet, PacketType, Role, WispError,
+	CloseReason, Packet, PacketType, Role, WispError,
 };
 
 async fn maybe_wisp_v2<R>(
@@ -67,15 +67,61 @@ async fn send_info_packet(
 		.await
 }
 
+trait Multiplexor {
+	fn has_extension(&self, extension_id: u8) -> bool;
+	async fn exit(&self, reason: CloseReason) -> Result<(), WispError>;
+}
+
+/// Result of creating a multiplexor. Helps require protocol extensions.
+#[allow(private_bounds)]
+pub struct MuxResult<M, F>(M, F)
+where
+	M: Multiplexor,
+	F: Future<Output = Result<(), WispError>> + Send;
+
+#[allow(private_bounds)]
+impl<M, F> MuxResult<M, F>
+where
+	M: Multiplexor,
+	F: Future<Output = Result<(), WispError>> + Send,
+{
+	/// Require no protocol extensions.
+	pub fn with_no_required_extensions(self) -> (M, F) {
+		(self.0, self.1)
+	}
+
+	/// Require protocol extensions by their ID. Will close the multiplexor connection if
+	/// extensions are not supported.
+	pub async fn with_required_extensions(self, extensions: &[u8]) -> Result<(M, F), WispError> {
+		let mut unsupported_extensions = Vec::new();
+		for extension in extensions {
+			if !self.0.has_extension(*extension) {
+				unsupported_extensions.push(*extension);
+			}
+		}
+
+		if unsupported_extensions.is_empty() {
+			Ok((self.0, self.1))
+		} else {
+			self.0.exit(CloseReason::ExtensionsIncompatible).await?;
+			self.1.await?;
+			Err(WispError::ExtensionsNotSupported(unsupported_extensions))
+		}
+	}
+
+	/// Shorthand for `with_required_extensions(&[UdpProtocolExtension::ID])`
+	pub async fn with_udp_extension_required(self) -> Result<(M, F), WispError> {
+		self.with_required_extensions(&[UdpProtocolExtension::ID])
+			.await
+	}
+}
+
+type WispV2ClosureResult = Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>;
+type WispV2ClosureBuilders<'a> = &'a mut [AnyProtocolExtensionBuilder];
 /// Wisp V2 handshake and protocol extension settings wrapper struct.
 pub struct WispV2Extensions {
 	builders: Vec<AnyProtocolExtensionBuilder>,
-	closure: Box<
-		dyn Fn(
-				&mut [AnyProtocolExtensionBuilder],
-			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
-			+ Send,
-	>,
+	closure: Box<dyn Fn(WispV2ClosureBuilders) -> WispV2ClosureResult + Send>,
 }
 
 impl WispV2Extensions {
@@ -90,11 +136,7 @@ impl WispV2Extensions {
 	/// Create a Wisp V2 settings struct with some middleware.
 	pub fn new_with_middleware<C>(builders: Vec<AnyProtocolExtensionBuilder>, closure: C) -> Self
 	where
-		C: Fn(
-				&mut [AnyProtocolExtensionBuilder],
-			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
-			+ Send
-			+ 'static,
+		C: Fn(WispV2ClosureBuilders) -> WispV2ClosureResult + Send + 'static,
 	{
 		Self {
 			builders,
