@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::{
 	extensions::{AnyProtocolExtension, AnyProtocolExtensionBuilder},
 	ws::{self, Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead},
@@ -59,8 +61,9 @@ mod close {
 		Voluntary = 0x02,
 		/// Unexpected stream closure due to a network error.
 		Unexpected = 0x03,
-		/// Incompatible extensions. Only used during the handshake.
+		/// Incompatible extensions.
 		ExtensionsIncompatible = 0x04,
+
 		/// Stream creation failed due to invalid information.
 		ServerStreamInvalidInfo = 0x41,
 		/// Stream creation failed due to an unreachable destination host.
@@ -75,31 +78,41 @@ mod close {
 		ServerStreamBlockedAddress = 0x48,
 		/// Connection throttled by the server.
 		ServerStreamThrottled = 0x49,
-		/// The client has encountered an unexpected error.
+
+		/// The client has encountered an unexpected error and is unable to recieve any more data.
 		ClientUnexpected = 0x81,
+
 		/// Authentication failed due to invalid username/password.
 		ExtensionsPasswordAuthFailed = 0xc0,
 		/// Authentication failed due to invalid signature.
 		ExtensionsCertAuthFailed = 0xc1,
+		/// Authentication required but the client did not provide credentials.
+		ExtensionsAuthRequired = 0xc2,
 	}
 
 	impl TryFrom<u8> for CloseReason {
 		type Error = WispError;
 		fn try_from(close_reason: u8) -> Result<Self, Self::Error> {
-			use CloseReason as R;
 			match close_reason {
-				0x01 => Ok(R::Unknown),
-				0x02 => Ok(R::Voluntary),
-				0x03 => Ok(R::Unexpected),
-				0x04 => Ok(R::ExtensionsIncompatible),
-				0x41 => Ok(R::ServerStreamInvalidInfo),
-				0x42 => Ok(R::ServerStreamUnreachable),
-				0x43 => Ok(R::ServerStreamConnectionTimedOut),
-				0x44 => Ok(R::ServerStreamConnectionRefused),
-				0x47 => Ok(R::ServerStreamTimedOut),
-				0x48 => Ok(R::ServerStreamBlockedAddress),
-				0x49 => Ok(R::ServerStreamThrottled),
-				0x81 => Ok(R::ClientUnexpected),
+				0x01 => Ok(Self::Unknown),
+				0x02 => Ok(Self::Voluntary),
+				0x03 => Ok(Self::Unexpected),
+				0x04 => Ok(Self::ExtensionsIncompatible),
+
+				0x41 => Ok(Self::ServerStreamInvalidInfo),
+				0x42 => Ok(Self::ServerStreamUnreachable),
+				0x43 => Ok(Self::ServerStreamConnectionTimedOut),
+				0x44 => Ok(Self::ServerStreamConnectionRefused),
+				0x47 => Ok(Self::ServerStreamTimedOut),
+				0x48 => Ok(Self::ServerStreamBlockedAddress),
+				0x49 => Ok(Self::ServerStreamThrottled),
+
+				0x81 => Ok(Self::ClientUnexpected),
+
+				0xc0 => Ok(Self::ExtensionsPasswordAuthFailed),
+				0xc1 => Ok(Self::ExtensionsCertAuthFailed),
+				0xc2 => Ok(Self::ExtensionsAuthRequired),
+
 				_ => Err(Self::Error::InvalidCloseReason),
 			}
 		}
@@ -116,6 +129,7 @@ mod close {
 					C::Voluntary => "Voluntarily closed",
 					C::Unexpected => "Unexpectedly closed",
 					C::ExtensionsIncompatible => "Incompatible protocol extensions",
+
 					C::ServerStreamInvalidInfo =>
 						"Stream creation failed due to invalid information",
 					C::ServerStreamUnreachable =>
@@ -127,9 +141,12 @@ mod close {
 					C::ServerStreamTimedOut => "TCP timed out",
 					C::ServerStreamBlockedAddress => "Destination address is blocked",
 					C::ServerStreamThrottled => "Throttled",
+
 					C::ClientUnexpected => "Client encountered unexpected error",
+
 					C::ExtensionsPasswordAuthFailed => "Invalid username/password",
 					C::ExtensionsCertAuthFailed => "Invalid signature",
+					C::ExtensionsAuthRequired => "Authentication required",
 				}
 			)
 		}
@@ -269,6 +286,12 @@ pub struct WispVersion {
 	pub major: u8,
 	/// Minor Wisp version according to semver.
 	pub minor: u8,
+}
+
+impl Display for WispVersion {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}.{}", self.major, self.minor)
+	}
 }
 
 /// Packet used in the initial handshake.
@@ -450,7 +473,10 @@ impl<'a> Packet<'a> {
 		};
 
 		if version.major != WISP_VERSION.major {
-			return Err(WispError::IncompatibleProtocolVersion);
+			return Err(WispError::IncompatibleProtocolVersion(
+				version,
+				WISP_VERSION,
+			));
 		}
 
 		let mut extensions = Vec::new();

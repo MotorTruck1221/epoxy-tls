@@ -33,6 +33,7 @@ use std::{
 	},
 	time::Duration,
 };
+use thiserror::Error;
 use ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload};
 
 /// Wisp version supported by this crate.
@@ -48,132 +49,85 @@ pub enum Role {
 }
 
 /// Errors the Wisp implementation can return.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum WispError {
 	/// The packet received did not have enough data.
+	#[error("Packet too small")]
 	PacketTooSmall,
 	/// The packet received had an invalid type.
+	#[error("Invalid packet type")]
 	InvalidPacketType,
 	/// The stream had an invalid ID.
+	#[error("Invalid steam ID")]
 	InvalidStreamId,
 	/// The close packet had an invalid reason.
+	#[error("Invalid close reason")]
 	InvalidCloseReason,
-	/// The URI received was invalid.
-	InvalidUri,
-	/// The URI received had no host.
-	UriHasNoHost,
-	/// The URI received had no port.
-	UriHasNoPort,
 	/// The max stream count was reached.
+	#[error("Maximum stream count reached")]
 	MaxStreamCountReached,
 	/// The Wisp protocol version was incompatible.
-	IncompatibleProtocolVersion,
+	#[error("Incompatible Wisp protocol version: found {0} but needed {1}")]
+	IncompatibleProtocolVersion(WispVersion, WispVersion),
 	/// The stream had already been closed.
+	#[error("Stream already closed")]
 	StreamAlreadyClosed,
 
 	/// The websocket frame received had an invalid type.
+	#[error("Invalid websocket frame type: {0:?}")]
 	WsFrameInvalidType(ws::OpCode),
 	/// The websocket frame received was not finished.
+	#[error("Unfinished websocket frame")]
 	WsFrameNotFinished,
 	/// Error specific to the websocket implementation.
+	#[error("Websocket implementation error:")]
 	WsImplError(Box<dyn std::error::Error + Sync + Send>),
 	/// The websocket implementation socket closed.
+	#[error("Websocket implementation error: socket closed")]
 	WsImplSocketClosed,
 	/// The websocket implementation did not support the action.
+	#[error("Websocket implementation error: not supported")]
 	WsImplNotSupported,
 
 	/// The string was invalid UTF-8.
-	Utf8Error(std::str::Utf8Error),
+	#[error("UTF-8 error: {0}")]
+	Utf8Error(#[from] std::str::Utf8Error),
 	/// The integer failed to convert.
-	TryFromIntError(std::num::TryFromIntError),
+	#[error("Integer conversion error: {0}")]
+	TryFromIntError(#[from] std::num::TryFromIntError),
 	/// Other error.
+	#[error("Other: {0:?}")]
 	Other(Box<dyn std::error::Error + Sync + Send>),
 
 	/// Failed to send message to multiplexor task.
+	#[error("Failed to send multiplexor message")]
 	MuxMessageFailedToSend,
 	/// Failed to receive message from multiplexor task.
+	#[error("Failed to receive multiplexor message")]
 	MuxMessageFailedToRecv,
 	/// Multiplexor task ended.
+	#[error("Multiplexor task ended")]
 	MuxTaskEnded,
 	/// Multiplexor task already started.
+	#[error("Multiplexor task already started")]
 	MuxTaskStarted,
 
 	/// Error specific to the protocol extension implementation.
+	#[error("Protocol extension implementation error: {0:?}")]
 	ExtensionImplError(Box<dyn std::error::Error + Sync + Send>),
 	/// The protocol extension implementation did not support the action.
+	#[error("Protocol extension implementation error: unsupported feature")]
 	ExtensionImplNotSupported,
-	/// The specified protocol extensions are not supported by the server.
+	/// The specified protocol extensions are not supported by the other side.
+	#[error("Protocol extensions {0:?} not supported")]
 	ExtensionsNotSupported(Vec<u8>),
 	/// The password authentication username/password was invalid.
+	#[error("Password protocol extension: Invalid username/password")]
 	PasswordExtensionCredsInvalid,
 	/// The certificate authentication signature was invalid.
+	#[error("Certificate authentication protocol extension: Invalid signature")]
 	CertAuthExtensionSigInvalid,
 }
-
-impl From<std::str::Utf8Error> for WispError {
-	fn from(err: std::str::Utf8Error) -> Self {
-		Self::Utf8Error(err)
-	}
-}
-
-impl From<std::num::TryFromIntError> for WispError {
-	fn from(value: std::num::TryFromIntError) -> Self {
-		Self::TryFromIntError(value)
-	}
-}
-
-impl std::fmt::Display for WispError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-		match self {
-			Self::PacketTooSmall => write!(f, "Packet too small"),
-			Self::InvalidPacketType => write!(f, "Invalid packet type"),
-			Self::InvalidStreamId => write!(f, "Invalid stream id"),
-			Self::InvalidCloseReason => write!(f, "Invalid close reason"),
-			Self::InvalidUri => write!(f, "Invalid URI"),
-			Self::UriHasNoHost => write!(f, "URI has no host"),
-			Self::UriHasNoPort => write!(f, "URI has no port"),
-			Self::MaxStreamCountReached => write!(f, "Maximum stream count reached"),
-			Self::IncompatibleProtocolVersion => write!(f, "Incompatible Wisp protocol version"),
-			Self::StreamAlreadyClosed => write!(f, "Stream already closed"),
-			Self::WsFrameInvalidType(ty) => write!(f, "Invalid websocket frame type: {:?}", ty),
-			Self::WsFrameNotFinished => write!(f, "Unfinished websocket frame"),
-			Self::WsImplError(err) => write!(f, "Websocket implementation error: {}", err),
-			Self::WsImplSocketClosed => {
-				write!(f, "Websocket implementation error: websocket closed")
-			}
-			Self::WsImplNotSupported => {
-				write!(f, "Websocket implementation error: unsupported feature")
-			}
-			Self::ExtensionImplError(err) => {
-				write!(f, "Protocol extension implementation error: {}", err)
-			}
-			Self::ExtensionImplNotSupported => {
-				write!(
-					f,
-					"Protocol extension implementation error: unsupported feature"
-				)
-			}
-			Self::ExtensionsNotSupported(list) => {
-				write!(f, "Protocol extensions {:?} not supported", list)
-			}
-			Self::Utf8Error(err) => write!(f, "UTF-8 error: {}", err),
-			Self::TryFromIntError(err) => write!(f, "Integer conversion error: {}", err),
-			Self::Other(err) => write!(f, "Other error: {}", err),
-			Self::MuxMessageFailedToSend => write!(f, "Failed to send multiplexor message"),
-			Self::MuxMessageFailedToRecv => write!(f, "Failed to receive multiplexor message"),
-			Self::MuxTaskEnded => write!(f, "Multiplexor task ended"),
-			Self::MuxTaskStarted => write!(f, "Multiplexor task already started"),
-			Self::PasswordExtensionCredsInvalid => {
-				write!(f, "Password extension: Invalid username/password")
-			}
-			Self::CertAuthExtensionSigInvalid => {
-				write!(f, "Certificate authentication extension: Invalid signature")
-			}
-		}
-	}
-}
-
-impl std::error::Error for WispError {}
 
 async fn maybe_wisp_v2<R>(
 	read: &mut R,
