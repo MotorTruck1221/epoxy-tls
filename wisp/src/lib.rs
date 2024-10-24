@@ -14,7 +14,6 @@ pub mod generic;
 mod inner;
 mod mux;
 mod packet;
-mod sink_unfold;
 mod stream;
 pub mod ws;
 

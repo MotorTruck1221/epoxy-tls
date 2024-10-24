@@ -2,7 +2,7 @@ mod client;
 mod server;
 use std::{future::Future, pin::Pin, time::Duration};
 
-pub use client::ClientMux;
+pub use client::{ClientMux, ClientMuxResult};
 use futures::{select, FutureExt};
 use futures_timer::Delay;
 pub use server::{ServerMux, ServerMuxResult};
