@@ -208,7 +208,7 @@ fn handle_stream(stream: ServerRouteResult, id: String) {
 	tokio::spawn(async move {
 		CLIENTS.insert(id.clone(), (DashMap::new(), false));
 		let res = match stream {
-			ServerRouteResult::Wisp(stream) => handle_wisp(stream, id.clone()).await,
+			ServerRouteResult::Wisp(stream, is_v2) => handle_wisp(stream, is_v2, id.clone()).await,
 			ServerRouteResult::WsProxy(ws, path, udp) => {
 				handle_wsproxy(ws, id.clone(), path, udp).await
 			}

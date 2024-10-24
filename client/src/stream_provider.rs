@@ -31,7 +31,7 @@ pub type ProviderUnencryptedAsyncRW = MuxStreamAsyncRW;
 pub type ProviderTlsAsyncRW = IgnoreCloseNotify;
 pub type ProviderAsyncRW = Either<ProviderTlsAsyncRW, ProviderUnencryptedAsyncRW>;
 pub type ProviderWispTransportGenerator = Box<
-	dyn Fn() -> Pin<
+	dyn Fn(bool) -> Pin<
 			Box<
 				dyn Future<
 						Output = Result<
@@ -124,7 +124,7 @@ impl StreamProvider {
 			None
 		};
 
-		let (read, write) = (self.wisp_generator)().await?;
+		let (read, write) = (self.wisp_generator)(self.wisp_v2).await?;
 
 		let client = ClientMux::create(read, write, extensions).await?;
 		let (mux, fut) = if self.udp_extension {

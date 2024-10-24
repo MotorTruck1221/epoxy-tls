@@ -16,6 +16,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	const test_url = params.get("url");
 	const wisp_url = params.get("wisp") || "ws://localhost:4000/";
 	const wisp_v1 = params.has("v1");
+	const wisp_udp = params.has("udp_extension");
 	console.log(
 		"%cWASM is significantly slower with DevTools open!",
 		"color:red;font-size:3rem;font-weight:bold"
@@ -33,6 +34,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	let epoxy_client_options = new EpoxyClientOptions();
 	epoxy_client_options.user_agent = navigator.userAgent;
 	epoxy_client_options.wisp_v2 = !wisp_v1;
+	epoxy_client_options.udp_extension_required = wisp_udp;
 
 	let epoxy_client;
 

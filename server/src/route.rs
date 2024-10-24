@@ -5,8 +5,8 @@ use bytes::Bytes;
 use fastwebsockets::{upgrade::UpgradeFut, FragmentCollector};
 use http_body_util::Full;
 use hyper::{
-	body::Incoming, server::conn::http1::Builder, service::service_fn, HeaderMap, Request,
-	Response, StatusCode,
+	body::Incoming, header::SEC_WEBSOCKET_PROTOCOL, server::conn::http1::Builder,
+	service::service_fn, HeaderMap, Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
 use log::{debug, error, trace};
@@ -24,6 +24,25 @@ use crate::{
 	stream::WebSocketStreamWrapper,
 	CONFIG,
 };
+
+pub type WispResult = (
+	Box<dyn WebSocketRead + Send>,
+	Box<dyn WebSocketWrite + Send>,
+);
+
+pub enum ServerRouteResult {
+	Wisp(WispResult, bool),
+	WsProxy(WebSocketStreamWrapper, String, bool),
+}
+
+impl Display for ServerRouteResult {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Wisp(..) => write!(f, "Wisp"),
+			Self::WsProxy(_, path, udp) => write!(f, "WsProxy path {:?} udp {:?}", path, udp),
+		}
+	}
+}
 
 type Body = Full<Bytes>;
 fn non_ws_resp() -> anyhow::Result<Response<Body>> {
@@ -57,7 +76,7 @@ fn get_header(headers: &HeaderMap, header: &str) -> Option<String> {
 }
 
 enum HttpUpgradeResult {
-	Wisp,
+	Wisp(bool),
 	WsProxy(String, bool),
 }
 
@@ -90,7 +109,7 @@ where
 
 	let (resp, fut) = fastwebsockets::upgrade::upgrade(&mut req)?;
 	// replace body of Empty<Bytes> with Full<Bytes>
-	let resp = Response::from_parts(resp.into_parts().0, Body::new(Bytes::new()));
+	let mut resp = Response::from_parts(resp.into_parts().0, Body::new(Bytes::new()));
 
 	let headers = req.headers();
 	let ip_header = if CONFIG.server.use_real_ip_headers {
@@ -99,25 +118,27 @@ where
 		None
 	};
 
-	if req
-		.uri()
-		.path()
-		.starts_with(&(CONFIG.wisp.prefix.clone() + "/"))
-	{
+	let ws_protocol = headers.get(SEC_WEBSOCKET_PROTOCOL);
+	let req_path = req.uri().path().to_string();
+
+	if req_path.starts_with(&(CONFIG.wisp.prefix.clone() + "/")) {
+		let has_ws_protocol = ws_protocol.is_some();
 		tokio::spawn(async move {
-			if let Err(err) = (callback)(fut, HttpUpgradeResult::Wisp, ip_header).await {
+			if let Err(err) =
+				(callback)(fut, HttpUpgradeResult::Wisp(has_ws_protocol), ip_header).await
+			{
 				error!("error while serving client: {:?}", err);
 			}
 		});
+		if let Some(protocol) = ws_protocol {
+			resp.headers_mut()
+				.append(SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+		}
 	} else if CONFIG.wisp.allow_wsproxy {
 		let udp = req.uri().query().unwrap_or_default() == "?udp";
 		tokio::spawn(async move {
-			if let Err(err) = (callback)(
-				fut,
-				HttpUpgradeResult::WsProxy(req.uri().path().to_string(), udp),
-				ip_header,
-			)
-			.await
+			if let Err(err) =
+				(callback)(fut, HttpUpgradeResult::WsProxy(req_path, udp), ip_header).await
 			{
 				error!("error while serving client: {:?}", err);
 			}
@@ -162,7 +183,7 @@ pub async fn route(
 								ws.set_auto_pong(false);
 
 								match res {
-									HttpUpgradeResult::Wisp => {
+									HttpUpgradeResult::Wisp(is_v2) => {
 										let (read, write) = ws.split(|x| {
 											let parts = x
 												.into_inner()
@@ -173,10 +194,10 @@ pub async fn route(
 										});
 
 										(callback)(
-											ServerRouteResult::Wisp((
-												Box::new(read),
-												Box::new(write),
-											)),
+											ServerRouteResult::Wisp(
+												(Box::new(read), Box::new(write)),
+												is_v2,
+											),
 											maybe_ip,
 										)
 									}
@@ -208,29 +229,10 @@ pub async fn route(
 			let write = GenericWebSocketWrite::new(FramedWrite::new(write, codec));
 
 			(callback)(
-				ServerRouteResult::Wisp((Box::new(read), Box::new(write))),
+				ServerRouteResult::Wisp((Box::new(read), Box::new(write)), true),
 				None,
 			);
 		}
 	}
 	Ok(())
-}
-
-pub type WispResult = (
-	Box<dyn WebSocketRead + Send>,
-	Box<dyn WebSocketWrite + Send>,
-);
-
-pub enum ServerRouteResult {
-	Wisp(WispResult),
-	WsProxy(WebSocketStreamWrapper, String, bool),
-}
-
-impl Display for ServerRouteResult {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			Self::Wisp(_) => write!(f, "Wisp"),
-			Self::WsProxy(_, path, udp) => write!(f, "WsProxy path {:?} udp {:?}", path, udp),
-		}
-	}
 }

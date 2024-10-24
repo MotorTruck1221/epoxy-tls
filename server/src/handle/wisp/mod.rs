@@ -211,7 +211,7 @@ async fn handle_stream(
 	}
 }
 
-pub async fn handle_wisp(stream: WispResult, id: String) -> anyhow::Result<()> {
+pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow::Result<()> {
 	let (read, write) = stream;
 	cfg_if! {
 		if #[cfg(feature = "twisp")] {
@@ -232,11 +232,16 @@ pub async fn handle_wisp(stream: WispResult, id: String) -> anyhow::Result<()> {
 		}
 	}
 
-	let (mux, fut) = ServerMux::create(read, write, buffer_size, extensions)
-		.await
-		.context("failed to create server multiplexor")?
-		.with_required_extensions(&required_extensions)
-		.await?;
+	let (mux, fut) = ServerMux::create(
+		read,
+		write,
+		buffer_size,
+		if is_v2 { extensions } else { None },
+	)
+	.await
+	.context("failed to create server multiplexor")?
+	.with_required_extensions(&required_extensions)
+	.await?;
 	let mux = Arc::new(mux);
 
 	debug!(

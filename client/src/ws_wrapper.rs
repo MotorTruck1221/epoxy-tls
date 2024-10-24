@@ -153,7 +153,7 @@ impl WebSocketWrapper {
 					.into(),
 			)
 		}
-		.map_err(|_| EpoxyError::WebSocketConnectFailed)?;
+		.map_err(|x| EpoxyError::WebSocketConnectFailed(format!("{:?}", x)))?;
 		ws.set_binary_type(BinaryType::Arraybuffer);
 		ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 		ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));

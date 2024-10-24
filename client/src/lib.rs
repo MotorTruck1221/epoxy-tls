@@ -27,8 +27,8 @@ use stream_provider::{StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_body, entries_of_object, from_entries, is_null_body,
-	is_redirect, object_get, object_set, object_truthy, IncomingBody, UriExt, WasmExecutor,
-	WispTransportRead, WispTransportWrite,
+	is_redirect, object_get, object_set, object_truthy, ws_protocol, IncomingBody, UriExt,
+	WasmExecutor, WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -118,8 +118,8 @@ pub enum EpoxyError {
 	#[error("Webpki: {0:?} ({0})")]
 	Webpki(#[from] webpki::Error),
 
-	#[error("Wisp WebSocket failed to connect")]
-	WebSocketConnectFailed,
+	#[error("Wisp WebSocket failed to connect: {0}")]
+	WebSocketConnectFailed(String),
 
 	#[error("Custom Wisp transport: {0}")]
 	WispTransport(String),
@@ -357,14 +357,20 @@ impl EpoxyClient {
 
 			let ws_protocols = options.websocket_protocols.clone();
 			Arc::new(StreamProvider::new(
-				Box::new(move || {
+				Box::new(move |wisp_v2| {
 					let wisp_url = wisp_url.clone();
-					let ws_protocols = ws_protocols.clone();
+					let mut ws_protocols = ws_protocols.clone();
+					if wisp_v2 {
+						// send some random data to ask the server for v2
+						ws_protocols.push(ws_protocol());
+					}
 
 					Box::pin(async move {
 						let (write, read) = WebSocketWrapper::connect(&wisp_url, &ws_protocols)?;
 						if !write.wait_for_open().await {
-							return Err(EpoxyError::WebSocketConnectFailed);
+							return Err(EpoxyError::WebSocketConnectFailed(
+								"websocket did not open".to_string(),
+							));
 						}
 						Ok((
 							Box::new(read) as Box<dyn WebSocketRead + Send>,
@@ -377,7 +383,7 @@ impl EpoxyClient {
 		} else if let Some(wisp_transport) = transport.dyn_ref::<Function>() {
 			let wisp_transport = SendWrapper::new(wisp_transport.clone());
 			Arc::new(StreamProvider::new(
-				Box::new(move || {
+				Box::new(move |_| {
 					let wisp_transport = wisp_transport.clone();
 					Box::pin(SendWrapper::new(async move {
 						let transport = wisp_transport
@@ -431,10 +437,8 @@ impl EpoxyClient {
 			.http1_max_headers(options.header_limit);
 
 		#[cfg(feature = "full")]
-		builder
-			.http2_max_concurrent_reset_streams(10); // set back to default, on wasm it is 0
-		let client = builder
-			.build(service);
+		builder.http2_max_concurrent_reset_streams(10); // set back to default, on wasm it is 0
+		let client = builder.build(service);
 
 		Ok(Self {
 			stream_provider,
