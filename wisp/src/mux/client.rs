@@ -12,12 +12,71 @@ use futures::channel::oneshot;
 use crate::{
 	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension},
 	inner::{MuxInner, WsEvent},
+	mux::send_info_packet,
 	ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	CloseReason, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role, StreamType,
 	WispError,
 };
 
-use super::{maybe_wisp_v2, send_info_packet, Multiplexor, MuxResult, WispV2Extensions};
+use super::{
+	get_supported_extensions, validate_continue_packet, Multiplexor, MuxResult,
+	WispHandshakeResult, WispHandshakeResultKind, WispV2Extensions,
+};
+
+async fn handshake<R: WebSocketRead>(
+	rx: &mut R,
+	tx: &LockedWebSocketWrite,
+	v2_info: Option<WispV2Extensions>,
+) -> Result<(WispHandshakeResult, u32), WispError> {
+	if let Some(WispV2Extensions {
+		mut builders,
+		closure,
+	}) = v2_info
+	{
+		let packet =
+			Packet::maybe_parse_info(rx.wisp_read_frame(tx).await?, Role::Client, &mut builders)?;
+
+		if let PacketType::Info(info) = packet.packet_type {
+			// v2 server
+			let buffer_size = validate_continue_packet(rx.wisp_read_frame(tx).await?.try_into()?)?;
+
+			(closure)(&mut builders).await?;
+			send_info_packet(tx, &mut builders).await?;
+
+			Ok((
+				WispHandshakeResult {
+					kind: WispHandshakeResultKind::V2 {
+						extensions: get_supported_extensions(info.extensions, &mut builders),
+					},
+					downgraded: false,
+				},
+				buffer_size,
+			))
+		} else {
+			// downgrade to v1
+			let buffer_size = validate_continue_packet(packet)?;
+
+			Ok((
+				WispHandshakeResult {
+					kind: WispHandshakeResultKind::V1 { frame: None },
+					downgraded: true,
+				},
+				buffer_size,
+			))
+		}
+	} else {
+		// user asked for a v1 client
+		let buffer_size = validate_continue_packet(rx.wisp_read_frame(tx).await?.try_into()?)?;
+
+		Ok((
+			WispHandshakeResult {
+				kind: WispHandshakeResultKind::V1 { frame: None },
+				downgraded: false,
+			},
+			buffer_size,
+		))
+	}
+}
 
 /// Client side multiplexor.
 pub struct ClientMux {
@@ -48,49 +107,29 @@ impl ClientMux {
 		W: WebSocketWrite + Send + 'static,
 	{
 		let tx = LockedWebSocketWrite::new(Box::new(tx));
-		let first_packet = Packet::try_from(rx.wisp_read_frame(&tx).await?)?;
 
-		if first_packet.stream_id != 0 {
-			return Err(WispError::InvalidStreamId);
-		}
+		let (handshake_result, buffer_size) = handshake(&mut rx, &tx, wisp_v2).await?;
+		let (extensions, frame) = handshake_result.kind.into_parts();
 
-		if let PacketType::Continue(packet) = first_packet.packet_type {
-			let (supported_extensions, extra_packet, downgraded) = if let Some(WispV2Extensions {
-				mut builders,
-				closure,
-			}) = wisp_v2
-			{
-				let res = maybe_wisp_v2(&mut rx, &tx, Role::Client, &mut builders).await?;
-				// if not downgraded
-				if !res.2 {
-					(closure)(&mut builders).await?;
-					send_info_packet(&tx, &mut builders).await?;
-				}
-				res
-			} else {
-				(Vec::new(), None, true)
-			};
+		let mux_inner = MuxInner::new_client(
+			AppendingWebSocketRead(frame, rx),
+			tx.clone(),
+			extensions.clone(),
+			buffer_size,
+		);
 
-			let mux_result = MuxInner::new_client(
-				AppendingWebSocketRead(extra_packet, rx),
-				tx.clone(),
-				supported_extensions.clone(),
-				packet.buffer_remaining,
-			);
+		Ok(MuxResult(
+			Self {
+				actor_tx: mux_inner.actor_tx,
+				actor_exited: mux_inner.actor_exited,
 
-			Ok(MuxResult(
-				Self {
-					actor_tx: mux_result.actor_tx,
-					downgraded,
-					supported_extensions,
-					tx,
-					actor_exited: mux_result.actor_exited,
-				},
-				mux_result.mux.into_future(),
-			))
-		} else {
-			Err(WispError::InvalidPacketType)
-		}
+				tx,
+
+				downgraded: handshake_result.downgraded,
+				supported_extensions: extensions,
+			},
+			mux_inner.mux.into_future(),
+		))
 	}
 
 	/// Create a new stream, multiplexed through Wisp.

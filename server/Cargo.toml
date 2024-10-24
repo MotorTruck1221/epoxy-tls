@@ -38,7 +38,7 @@ tokio-rustls = { version = "0.26.0", features = ["ring", "tls12"], default-featu
 tokio-util = { version = "0.7.11", features = ["codec", "compat", "io-util", "net"] }
 toml = { version = "0.8.19", optional = true }
 uuid = { version = "1.10.0", features = ["v4"] }
-wisp-mux = { version = "5.0.0", path = "../wisp", features = ["fastwebsockets", "generic_stream", "certificate"] }
+wisp-mux = { version = "*", path = "../wisp", features = ["fastwebsockets", "generic_stream", "certificate"] }
 
 [features]
 default = ["toml"]

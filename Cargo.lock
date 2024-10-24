@@ -707,7 +707,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-pki-types",
  "rustls-webpki",
- "send_wrapper 0.6.0",
+ "send_wrapper",
  "thiserror",
  "tokio",
  "wasm-bindgen",
@@ -932,16 +932,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f90f7dce0722e95104fcb095585910c0977252f286e354b5e3bd38902cd99988"
 
 [[package]]
-name = "futures-timer"
-version = "3.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f288b0a4f20f9a56b5d1da57e2227c661b7b16168e2f72365f57b63326e29b24"
-dependencies = [
- "gloo-timers",
- "send_wrapper 0.4.0",
-]
-
-[[package]]
 name = "futures-util"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,18 +989,6 @@ dependencies = [
  "libgit2-sys",
  "log",
  "url",
-]
-
-[[package]]
-name = "gloo-timers"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b995a66bb87bebce9a0f4a95aed01daca4872c050bfcb21653361c03bc35e5c"
-dependencies = [
- "futures-channel",
- "futures-core",
- "js-sys",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1962,12 +1940,6 @@ name = "semver"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
-
-[[package]]
-name = "send_wrapper"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f638d531eccd6e23b980caf34876660d38e265409d8e99b397ab71eb3612fad0"
 
 [[package]]
 name = "send_wrapper"
@@ -3000,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-mux"
-version = "5.1.0"
+version = "6.0.0"
 dependencies = [
  "async-trait",
  "atomic_enum",
@@ -3011,7 +2983,6 @@ dependencies = [
  "fastwebsockets",
  "flume",
  "futures",
- "futures-timer",
  "getrandom",
  "nohash-hasher",
  "pin-project-lite",

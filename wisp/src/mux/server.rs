@@ -1,6 +1,5 @@
 use std::{
 	future::Future,
-	ops::DerefMut,
 	sync::{
 		atomic::{AtomicBool, Ordering},
 		Arc,
@@ -14,10 +13,63 @@ use crate::{
 	extensions::AnyProtocolExtension,
 	inner::{MuxInner, WsEvent},
 	ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
-	CloseReason, ConnectPacket, MuxProtocolExtensionStream, MuxStream, Packet, Role, WispError,
+	CloseReason, ConnectPacket, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role,
+	WispError,
 };
 
-use super::{maybe_wisp_v2, send_info_packet, Multiplexor, MuxResult, WispV2Extensions};
+use super::{
+	get_supported_extensions, send_info_packet, Multiplexor, MuxResult, WispHandshakeResult,
+	WispHandshakeResultKind, WispV2Extensions,
+};
+
+async fn handshake<R: WebSocketRead>(
+	rx: &mut R,
+	tx: &LockedWebSocketWrite,
+	buffer_size: u32,
+	v2_info: Option<WispV2Extensions>,
+) -> Result<WispHandshakeResult, WispError> {
+	if let Some(WispV2Extensions {
+		mut builders,
+		closure,
+	}) = v2_info
+	{
+		send_info_packet(tx, &mut builders).await?;
+		tx.write_frame(Packet::new_continue(0, buffer_size).into())
+			.await?;
+
+		(closure)(&mut builders).await?;
+
+		let packet =
+			Packet::maybe_parse_info(rx.wisp_read_frame(tx).await?, Role::Server, &mut builders)?;
+
+		if let PacketType::Info(info) = packet.packet_type {
+			// v2 client
+			Ok(WispHandshakeResult {
+				kind: WispHandshakeResultKind::V2 {
+					extensions: get_supported_extensions(info.extensions, &mut builders),
+				},
+				downgraded: false,
+			})
+		} else {
+			// downgrade to v1
+			Ok(WispHandshakeResult {
+				kind: WispHandshakeResultKind::V1 {
+					frame: Some(packet.into()),
+				},
+				downgraded: true,
+			})
+		}
+	} else {
+		// user asked for v1 server
+		tx.write_frame(Packet::new_continue(0, buffer_size).into())
+			.await?;
+
+		Ok(WispHandshakeResult {
+			kind: WispHandshakeResultKind::V1 { frame: None },
+			downgraded: false,
+		})
+	}
+}
 
 /// Server-side multiplexor.
 pub struct ServerMux {
@@ -52,36 +104,26 @@ impl ServerMux {
 		let tx = LockedWebSocketWrite::new(Box::new(tx));
 		let ret_tx = tx.clone();
 		let ret = async {
-			tx.write_frame(Packet::new_continue(0, buffer_size).into())
-				.await?;
-
-			let (supported_extensions, extra_packet, downgraded) = if let Some(WispV2Extensions {
-				mut builders,
-				closure,
-			}) = wisp_v2
-			{
-				send_info_packet(&tx, builders.deref_mut()).await?;
-				(closure)(builders.deref_mut()).await?;
-				maybe_wisp_v2(&mut rx, &tx, Role::Server, &mut builders).await?
-			} else {
-				(Vec::new(), None, true)
-			};
+			let handshake_result = handshake(&mut rx, &tx, buffer_size, wisp_v2).await?;
+			let (extensions, extra_packet) = handshake_result.kind.into_parts();
 
 			let (mux_result, muxstream_recv) = MuxInner::new_server(
 				AppendingWebSocketRead(extra_packet, rx),
 				tx.clone(),
-				supported_extensions.clone(),
+				extensions.clone(),
 				buffer_size,
 			);
 
 			Ok(MuxResult(
 				Self {
-					muxstream_recv,
 					actor_tx: mux_result.actor_tx,
-					downgraded,
-					supported_extensions,
-					tx,
 					actor_exited: mux_result.actor_exited,
+					muxstream_recv,
+
+					tx,
+
+					downgraded: handshake_result.downgraded,
+					supported_extensions: extensions,
 				},
 				mux_result.mux.into_future(),
 			))
