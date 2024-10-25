@@ -68,12 +68,6 @@ impl ProtocolExtension for MotdProtocolExtension {
 	}
 }
 
-impl From<MotdProtocolExtension> for AnyProtocolExtension {
-	fn from(value: MotdProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
-	}
-}
-
 /// MOTD protocol extension builder.
 pub enum MotdProtocolExtensionBuilder {
 	/// Server variant of MOTD protocol extension builder. Has the MOTD.

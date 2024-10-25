@@ -74,6 +74,12 @@ impl From<AnyProtocolExtension> for Bytes {
 	}
 }
 
+impl<T: ProtocolExtension> From<T> for AnyProtocolExtension {
+	fn from(value: T) -> Self {
+		Self::new(value)
+	}
+}
+
 /// A Wisp protocol extension.
 ///
 /// See [the
@@ -162,6 +168,8 @@ pub trait ProtocolExtensionBuilder: Sync + Send + 'static {
 	fn get_id(&self) -> u8;
 
 	/// Build a protocol extension from the extension's metadata.
+	///
+	/// This is called second on the server and first on the client.
 	fn build_from_bytes(
 		&mut self,
 		bytes: Bytes,
@@ -169,6 +177,8 @@ pub trait ProtocolExtensionBuilder: Sync + Send + 'static {
 	) -> Result<AnyProtocolExtension, WispError>;
 
 	/// Build a protocol extension to send to the other side.
+	///
+	/// This is called first on the server and second on the client.
 	fn build_to_extension(&mut self, role: Role) -> Result<AnyProtocolExtension, WispError>;
 
 	/// Do not override.
@@ -246,5 +256,11 @@ impl Deref for AnyProtocolExtensionBuilder {
 impl DerefMut for AnyProtocolExtensionBuilder {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.0.deref_mut()
+	}
+}
+
+impl<T: ProtocolExtensionBuilder> From<T> for AnyProtocolExtensionBuilder {
+	fn from(value: T) -> Self {
+		Self::new(value)
 	}
 }

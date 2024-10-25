@@ -124,11 +124,10 @@ where
 }
 
 type WispV2ClosureResult = Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>;
-type WispV2ClosureBuilders<'a> = &'a mut [AnyProtocolExtensionBuilder];
 /// Wisp V2 handshake and protocol extension settings wrapper struct.
 pub struct WispV2Extensions {
 	builders: Vec<AnyProtocolExtensionBuilder>,
-	closure: Box<dyn Fn(WispV2ClosureBuilders) -> WispV2ClosureResult + Send>,
+	closure: Box<dyn Fn(&mut Vec<AnyProtocolExtensionBuilder>) -> WispV2ClosureResult + Send>,
 }
 
 impl WispV2Extensions {
@@ -143,7 +142,7 @@ impl WispV2Extensions {
 	/// Create a Wisp V2 settings struct with some middleware.
 	pub fn new_with_middleware<C>(builders: Vec<AnyProtocolExtensionBuilder>, closure: C) -> Self
 	where
-		C: Fn(WispV2ClosureBuilders) -> WispV2ClosureResult + Send + 'static,
+		C: Fn(&mut Vec<AnyProtocolExtensionBuilder>) -> WispV2ClosureResult + Send + 'static,
 	{
 		Self {
 			builders,

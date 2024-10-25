@@ -162,9 +162,11 @@ pub struct WispConfig {
 	#[serde(skip_serializing_if = "HashMap::is_empty")]
 	/// Wisp version 2 password authentication extension username/passwords.
 	pub password_extension_users: HashMap<String, String>,
+	pub password_extension_required: bool,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	/// Wisp version 2 certificate authentication extension public ed25519 pem keys.
 	pub certificate_extension_keys: Vec<PathBuf>,
+	pub certificate_extension_required: bool,
 
 	#[serde(skip_serializing_if = "is_default_motd")]
 	/// Wisp version 2 MOTD extension message.
@@ -334,7 +336,9 @@ impl Default for WispConfig {
 			auth_extension: None,
 
 			password_extension_users: HashMap::new(),
+			password_extension_required: true,
 			certificate_extension_keys: Vec::new(),
+			certificate_extension_required: true,
 
 			motd_extension: default_motd(),
 		}
@@ -364,18 +368,24 @@ impl WispConfig {
 					extensions.push(AnyProtocolExtensionBuilder::new(
 						PasswordProtocolExtensionBuilder::new_server(
 							self.password_extension_users.clone(),
+							self.password_extension_required,
 						),
 					));
-					required_extensions.push(PasswordProtocolExtension::ID);
+					if self.password_extension_required {
+						required_extensions.push(PasswordProtocolExtension::ID);
+					}
 				}
 				Some(ProtocolExtensionAuth::Certificate) => {
 					extensions.push(AnyProtocolExtensionBuilder::new(
 						CertAuthProtocolExtensionBuilder::new_server(
 							get_certificates_from_paths(self.certificate_extension_keys.clone())
 								.await?,
+							self.certificate_extension_required,
 						),
 					));
-					required_extensions.push(CertAuthProtocolExtension::ID);
+					if self.certificate_extension_required {
+						required_extensions.push(CertAuthProtocolExtension::ID);
+					}
 				}
 				None => {}
 			}

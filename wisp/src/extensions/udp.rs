@@ -60,12 +60,6 @@ impl ProtocolExtension for UdpProtocolExtension {
 	}
 }
 
-impl From<UdpProtocolExtension> for AnyProtocolExtension {
-	fn from(value: UdpProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
-	}
-}
-
 /// UDP protocol extension builder.
 pub struct UdpProtocolExtensionBuilder;
 

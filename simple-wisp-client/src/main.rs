@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		let split: Vec<_> = auth.split(':').collect();
 		let username = split[0].to_string();
 		let password = split[1..].join(":");
-		PasswordProtocolExtensionBuilder::new_client(username, password)
+		PasswordProtocolExtensionBuilder::new_client(Some((username, password)))
 	});
 
 	println!(
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	}
 	if let Some(certauth) = opts.certauth {
 		let key = get_cert(certauth).await?;
-		let extension = CertAuthProtocolExtensionBuilder::new_client(key);
+		let extension = CertAuthProtocolExtensionBuilder::new_client(Some(key));
 		extensions.push(AnyProtocolExtensionBuilder::new(extension));
 		extension_ids.push(CertAuthProtocolExtension::ID);
 	}

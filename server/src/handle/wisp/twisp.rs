@@ -80,12 +80,6 @@ impl ProtocolExtension for TWispServerProtocolExtension {
 	}
 }
 
-impl From<TWispServerProtocolExtension> for AnyProtocolExtension {
-	fn from(value: TWispServerProtocolExtension) -> Self {
-		AnyProtocolExtension::new(value)
-	}
-}
-
 pub struct TWispServerProtocolExtensionBuilder(TwispMap);
 
 impl ProtocolExtensionBuilder for TWispServerProtocolExtensionBuilder {
@@ -124,7 +118,7 @@ pub fn new_map() -> TwispMap {
 }
 
 pub fn new_ext(map: TwispMap) -> AnyProtocolExtensionBuilder {
-	AnyProtocolExtensionBuilder::new(TWispServerProtocolExtensionBuilder(map))
+	TWispServerProtocolExtensionBuilder(map).into()
 }
 
 pub async fn handle_twisp(

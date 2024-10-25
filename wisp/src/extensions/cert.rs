@@ -116,6 +116,8 @@ pub enum CertAuthProtocolExtension {
 		cert_types: SupportedCertificateTypes,
 		/// Random challenge for the client.
 		challenge: Bytes,
+		/// Whether the server requires this authentication method.
+		required: bool,
 	},
 	/// Client variant of certificate authentication protocol extension.
 	Client {
@@ -126,8 +128,8 @@ pub enum CertAuthProtocolExtension {
 		/// Signature of challenge.
 		signature: Bytes,
 	},
-	/// Marker that client has successfully signed the challenge.
-	ClientSigned,
+	/// Marker that client has successfully recieved the challenge.
+	ClientRecieved,
 	/// Marker that server has successfully verified the client.
 	ServerVerified,
 }
@@ -155,8 +157,10 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 			Self::Server {
 				cert_types,
 				challenge,
+				required,
 			} => {
-				let mut out = BytesMut::with_capacity(1 + challenge.len());
+				let mut out = BytesMut::with_capacity(2 + challenge.len());
+				out.put_u8(*required as u8);
 				out.put_u8(cert_types.bits());
 				out.extend_from_slice(challenge);
 				out.freeze()
@@ -172,7 +176,7 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 				out.extend_from_slice(signature);
 				out.freeze()
 			}
-			Self::ClientSigned => Bytes::new(),
+			Self::ClientRecieved => Bytes::new(),
 			Self::ServerVerified => Bytes::new(),
 		}
 	}
@@ -199,12 +203,6 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 	}
 }
 
-impl From<CertAuthProtocolExtension> for AnyProtocolExtension {
-	fn from(value: CertAuthProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
-	}
-}
-
 /// Certificate authentication protocol extension builder.
 pub enum CertAuthProtocolExtensionBuilder {
 	/// Server variant of certificate authentication protocol extension before the challenge has
@@ -212,6 +210,8 @@ pub enum CertAuthProtocolExtensionBuilder {
 	ServerBeforeChallenge {
 		/// Keypair verifiers.
 		verifiers: Vec<VerifyKey>,
+		/// Whether the server requires this authentication method.
+		required: bool,
 	},
 	/// Server variant of certificate authentication protocol extension after the challenge has
 	/// been sent.
@@ -220,32 +220,62 @@ pub enum CertAuthProtocolExtensionBuilder {
 		verifiers: Vec<VerifyKey>,
 		/// Challenge to verify against.
 		challenge: Bytes,
+		/// Whether the server requires this authentication method.
+		required: bool,
 	},
 	/// Client variant of certificate authentication protocol extension before the challenge has
 	/// been recieved.
 	ClientBeforeChallenge {
 		/// Keypair signer.
-		signer: SigningKey,
+		signer: Option<SigningKey>,
 	},
 	/// Client variant of certificate authentication protocol extension after the challenge has
 	/// been recieved.
 	ClientAfterChallenge {
 		/// Keypair signer.
-		signer: SigningKey,
-		/// Signature of challenge recieved from the server.
-		signature: Bytes,
+		signer: Option<SigningKey>,
+		/// Supported certificate types recieved from the server.
+		cert_types: SupportedCertificateTypes,
+		/// Challenge recieved from the server.
+		challenge: Bytes,
+		/// Whether the server requires this authentication method.
+		required: bool,
 	},
 }
 
 impl CertAuthProtocolExtensionBuilder {
 	/// Create a new server variant of the certificate authentication protocol extension.
-	pub fn new_server(verifiers: Vec<VerifyKey>) -> Self {
-		Self::ServerBeforeChallenge { verifiers }
+	pub fn new_server(verifiers: Vec<VerifyKey>, required: bool) -> Self {
+		Self::ServerBeforeChallenge {
+			verifiers,
+			required,
+		}
 	}
 
 	/// Create a new client variant of the certificate authentication protocol extension.
-	pub fn new_client(signer: SigningKey) -> Self {
+	pub fn new_client(signer: Option<SigningKey>) -> Self {
 		Self::ClientBeforeChallenge { signer }
+	}
+
+	/// Get whether this authentication method is required. Could return None if the server has not
+	/// sent the certificate authentication protocol extension.
+	pub fn is_required(&self) -> Option<bool> {
+		match self {
+			Self::ServerBeforeChallenge { required, .. } => Some(*required),
+			Self::ServerAfterChallenge { required, .. } => Some(*required),
+			Self::ClientBeforeChallenge { .. } => None,
+			Self::ClientAfterChallenge { required, .. } => Some(*required),
+		}
+	}
+
+	/// Set the credentials sent to the server, if this is a client variant.
+	pub fn set_signing_key(&mut self, key: SigningKey) {
+		match self {
+			Self::ClientBeforeChallenge { signer } | Self::ClientAfterChallenge { signer, .. } => {
+				*signer = Some(key);
+			}
+			Self::ServerBeforeChallenge { .. } | Self::ServerAfterChallenge { .. } => {}
+		}
 	}
 }
 
@@ -268,6 +298,7 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 			Self::ServerAfterChallenge {
 				verifiers,
 				challenge,
+				..
 			} => {
 				// validate and parse response
 				let cert_type = SupportedCertificateTypes::from_bits(bytes.get_u8())
@@ -286,26 +317,19 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 				}
 			}
 			Self::ClientBeforeChallenge { signer } => {
+				let required = bytes.get_u8() != 0;
 				// sign challenge
 				let cert_types = SupportedCertificateTypes::from_bits(bytes.get_u8())
-					.ok_or(WispError::CertAuthExtensionSigInvalid)?;
-				if !cert_types.iter().any(|x| x == signer.cert_type) {
-					return Err(WispError::CertAuthExtensionSigInvalid);
-				}
-
-				let signed: Bytes = signer
-					.signer
-					.try_sign(&bytes)
-					.map_err(CertAuthError::from)?
-					.to_vec()
-					.into();
+					.ok_or(WispError::CertAuthExtensionCertTypeInvalid)?;
 
 				*self = Self::ClientAfterChallenge {
 					signer: signer.clone(),
-					signature: signed,
+					cert_types,
+					challenge: bytes,
+					required,
 				};
 
-				Ok(CertAuthProtocolExtension::ClientSigned.into())
+				Ok(CertAuthProtocolExtension::ClientRecieved.into())
 			}
 			// client has already recieved a challenge
 			Self::ClientAfterChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
@@ -316,19 +340,26 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 	// server: 1
 	fn build_to_extension(&mut self, _: Role) -> Result<AnyProtocolExtension, WispError> {
 		match self {
-			Self::ServerBeforeChallenge { verifiers } => {
+			Self::ServerBeforeChallenge {
+				verifiers,
+				required,
+			} => {
 				let mut challenge = [0u8; 64];
 				getrandom::getrandom(&mut challenge).map_err(CertAuthError::from)?;
 				let challenge = Bytes::from(challenge.to_vec());
 
+				let required = *required;
+
 				*self = Self::ServerAfterChallenge {
 					verifiers: verifiers.to_vec(),
 					challenge: challenge.clone(),
+					required,
 				};
 
 				Ok(CertAuthProtocolExtension::Server {
 					cert_types: SupportedCertificateTypes::Ed25519,
 					challenge,
+					required,
 				}
 				.into())
 			}
@@ -336,7 +367,24 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 			Self::ServerAfterChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
 			// client needs to recieve a challenge
 			Self::ClientBeforeChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
-			Self::ClientAfterChallenge { signer, signature } => {
+			Self::ClientAfterChallenge {
+				signer,
+				challenge,
+				cert_types,
+				..
+			} => {
+				let signer = signer.as_ref().ok_or(WispError::CertAuthExtensionNoKey)?;
+				if !cert_types.iter().any(|x| x == signer.cert_type) {
+					return Err(WispError::CertAuthExtensionCertTypeInvalid);
+				}
+
+				let signature: Bytes = signer
+					.signer
+					.try_sign(challenge)
+					.map_err(CertAuthError::from)?
+					.to_vec()
+					.into();
+
 				Ok(CertAuthProtocolExtension::Client {
 					cert_type: signer.cert_type,
 					hash: signer.hash,

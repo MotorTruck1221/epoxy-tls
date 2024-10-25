@@ -1,9 +1,8 @@
 //! Password protocol extension.
 //!
-//! Passwords are sent in plain text!!
+//! **Passwords are sent in plain text!!**
 //!
 //! See [the docs](https://github.com/MercuryWorkshop/wisp-protocol/blob/v2/protocol.md#0x02---password-authentication)
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -16,56 +15,53 @@ use crate::{
 
 use super::{AnyProtocolExtension, ProtocolExtension, ProtocolExtensionBuilder};
 
-#[derive(Debug, Clone)]
+/// ID of password protocol extension.
+pub const PASSWORD_PROTOCOL_EXTENSION_ID: u8 = 0x02;
+
 /// Password protocol extension.
 ///
 /// **Passwords are sent in plain text!!**
-/// **This extension will panic when encoding if the username's length does not fit within a u8
-/// or the password's length does not fit within a u16.**
-pub struct PasswordProtocolExtension {
-	/// The username to log in with.
-	///
-	/// This string's length must fit within a u8.
-	pub username: String,
-	/// The password to log in with.
-	///
-	/// This string's length must fit within a u16.
-	pub password: String,
-	role: Role,
+///
+/// See [the docs](https://github.com/MercuryWorkshop/wisp-protocol/blob/v2/protocol.md#0x02---password-authentication)
+#[derive(Debug, Clone)]
+pub enum PasswordProtocolExtension {
+	/// Password protocol extension before the client INFO packet has been received.
+	ServerBeforeClientInfo {
+		/// Whether this authentication method is required.
+		required: bool,
+	},
+	/// Password protocol extension after the client INFO packet has been received.
+	ServerAfterClientInfo {
+		/// The client's chosen user.
+		chosen_user: String,
+		/// The client's chosen password
+		chosen_password: String,
+	},
+
+	/// Password protocol extension before the server INFO has been received.
+	ClientBeforeServerInfo,
+	/// Password protocol extension after the server INFO has been received.
+	ClientAfterServerInfo {
+		/// The user to send to the server.
+		user: String,
+		/// The password to send to the user.
+		password: String,
+	},
 }
 
 impl PasswordProtocolExtension {
-	/// Password protocol extension ID.
-	pub const ID: u8 = 0x02;
-
-	/// Create a new password protocol extension for the server.
-	///
-	/// This signifies that the server requires a password.
-	pub fn new_server() -> Self {
-		Self {
-			username: String::new(),
-			password: String::new(),
-			role: Role::Server,
-		}
-	}
-
-	/// Create a new password protocol extension for the client, with a username and password.
-	///
-	/// The username's length must fit within a u8. The password's length must fit within a
-	/// u16.
-	pub fn new_client(username: String, password: String) -> Self {
-		Self {
-			username,
-			password,
-			role: Role::Client,
-		}
-	}
+	/// ID of password protocol extension.
+	pub const ID: u8 = PASSWORD_PROTOCOL_EXTENSION_ID;
 }
 
 #[async_trait]
 impl ProtocolExtension for PasswordProtocolExtension {
 	fn get_id(&self) -> u8 {
-		Self::ID
+		PASSWORD_PROTOCOL_EXTENSION_ID
+	}
+
+	fn box_clone(&self) -> Box<dyn ProtocolExtension + Sync + Send> {
+		Box::new(self.clone())
 	}
 
 	fn get_supported_packets(&self) -> &'static [u8] {
@@ -77,142 +73,179 @@ impl ProtocolExtension for PasswordProtocolExtension {
 	}
 
 	fn encode(&self) -> Bytes {
-		match self.role {
-			Role::Server => Bytes::new(),
-			Role::Client => {
-				let username = Bytes::from(self.username.clone().into_bytes());
-				let password = Bytes::from(self.password.clone().into_bytes());
-				let username_len = u8::try_from(username.len()).expect("username was too long");
-				let password_len = u16::try_from(password.len()).expect("password was too long");
-
-				let mut bytes =
-					BytesMut::with_capacity(3 + username_len as usize + password_len as usize);
-				bytes.put_u8(username_len);
-				bytes.put_u16_le(password_len);
-				bytes.extend(username);
-				bytes.extend(password);
-				bytes.freeze()
+		match self {
+			Self::ServerBeforeClientInfo { required } => {
+				let mut out = BytesMut::with_capacity(1);
+				out.put_u8(*required as u8);
+				out.freeze()
+			}
+			Self::ServerAfterClientInfo { .. } => Bytes::new(),
+			Self::ClientBeforeServerInfo => Bytes::new(),
+			Self::ClientAfterServerInfo { user, password } => {
+				let mut out = BytesMut::with_capacity(1 + 2 + user.len() + password.len());
+				out.put_u8(user.len().try_into().unwrap());
+				out.put_u16_le(password.len().try_into().unwrap());
+				out.extend_from_slice(user.as_bytes());
+				out.extend_from_slice(password.as_bytes());
+				out.freeze()
 			}
 		}
 	}
 
 	async fn handle_handshake(
 		&mut self,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_read: &mut dyn WebSocketRead,
+		_write: &LockedWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
 
 	async fn handle_packet(
 		&mut self,
-		_: Bytes,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_packet: Bytes,
+		_read: &mut dyn WebSocketRead,
+		_write: &LockedWebSocketWrite,
 	) -> Result<(), WispError> {
-		Ok(())
-	}
-
-	fn box_clone(&self) -> Box<dyn ProtocolExtension + Sync + Send> {
-		Box::new(self.clone())
-	}
-}
-
-impl From<PasswordProtocolExtension> for AnyProtocolExtension {
-	fn from(value: PasswordProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
+		Err(WispError::ExtensionImplNotSupported)
 	}
 }
 
 /// Password protocol extension builder.
 ///
 /// **Passwords are sent in plain text!!**
-pub struct PasswordProtocolExtensionBuilder {
-	/// Map of users and their passwords to allow. Only used on server.
-	pub users: HashMap<String, String>,
-	/// Username to authenticate with. Only used on client.
-	pub username: String,
-	/// Password to authenticate with. Only used on client.
-	pub password: String,
+///
+/// See [the docs](https://github.com/MercuryWorkshop/wisp-protocol/blob/v2/protocol.md#0x02---password-authentication)
+pub enum PasswordProtocolExtensionBuilder {
+	/// Password protocol extension builder before the client INFO has been received.
+	ServerBeforeClientInfo {
+		/// The user+password combinations to verify the client with.
+		users: HashMap<String, String>,
+		/// Whether this authentication method is required.
+		required: bool,
+	},
+	/// Password protocol extension builder after the client INFO has been received.
+	ServerAfterClientInfo {
+		/// The user+password combinations to verify the client with.
+		users: HashMap<String, String>,
+		/// Whether this authentication method is required.
+		required: bool,
+	},
+
+	/// Password protocol extension builder before the server INFO has been received.
+	ClientBeforeServerInfo {
+		/// The credentials to send to the server.
+		creds: Option<(String, String)>,
+	},
+	/// Password protocol extension builder after the server INFO has been received.
+	ClientAfterServerInfo {
+		/// The credentials to send to the server.
+		creds: Option<(String, String)>,
+		/// Whether this authentication method is required.
+		required: bool,
+	},
 }
 
 impl PasswordProtocolExtensionBuilder {
-	/// Create a new password protocol extension builder for the server, with a map of users
-	/// and passwords to allow.
-	pub fn new_server(users: HashMap<String, String>) -> Self {
-		Self {
-			users,
-			username: String::new(),
-			password: String::new(),
+	/// ID of password protocol extension.
+	pub const ID: u8 = PASSWORD_PROTOCOL_EXTENSION_ID;
+
+	/// Create a new server variant of the password protocol extension.
+	pub fn new_server(users: HashMap<String, String>, required: bool) -> Self {
+		Self::ServerBeforeClientInfo { users, required }
+	}
+
+	/// Create a new client variant of the password protocol extension with a username and password.
+	pub fn new_client(creds: Option<(String, String)>) -> Self {
+		Self::ClientBeforeServerInfo { creds }
+	}
+
+	/// Get whether this authentication method is required. Could return None if the server has not
+	/// sent the password protocol extension.
+	pub fn is_required(&self) -> Option<bool> {
+		match self {
+			Self::ServerBeforeClientInfo { required, .. } => Some(*required),
+			Self::ServerAfterClientInfo { required, .. } => Some(*required),
+			Self::ClientBeforeServerInfo { .. } => None,
+			Self::ClientAfterServerInfo { required, .. } => Some(*required),
 		}
 	}
 
-	/// Create a new password protocol extension builder for the client, with a username and
-	/// password to authenticate with.
-	pub fn new_client(username: String, password: String) -> Self {
-		Self {
-			users: HashMap::new(),
-			username,
-			password,
+	/// Set the credentials sent to the server, if this is a client variant.
+	pub fn set_creds(&mut self, credentials: (String, String)) {
+		match self {
+			Self::ClientBeforeServerInfo { creds } | Self::ClientAfterServerInfo { creds, .. } => {
+				*creds = Some(credentials);
+			}
+			Self::ServerBeforeClientInfo { .. } | Self::ServerAfterClientInfo { .. } => {}
 		}
 	}
 }
 
 impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 	fn get_id(&self) -> u8 {
-		PasswordProtocolExtension::ID
+		PASSWORD_PROTOCOL_EXTENSION_ID
+	}
+
+	fn build_to_extension(&mut self, _role: Role) -> Result<AnyProtocolExtension, WispError> {
+		match self {
+			Self::ServerBeforeClientInfo { users: _, required } => {
+				Ok(PasswordProtocolExtension::ServerBeforeClientInfo {
+					required: *required,
+				}
+				.into())
+			}
+			Self::ServerAfterClientInfo { .. } => Err(WispError::ExtensionImplNotSupported),
+			Self::ClientBeforeServerInfo { .. } => Err(WispError::ExtensionImplNotSupported),
+			Self::ClientAfterServerInfo { creds, .. } => {
+				let (user, password) = creds.clone().ok_or(WispError::PasswordExtensionNoCreds)?;
+				Ok(PasswordProtocolExtension::ClientAfterServerInfo { user, password }.into())
+			}
+		}
 	}
 
 	fn build_from_bytes(
 		&mut self,
-		mut payload: Bytes,
-		role: crate::Role,
+		mut bytes: Bytes,
+		_role: Role,
 	) -> Result<AnyProtocolExtension, WispError> {
-		match role {
-			Role::Server => {
-				if payload.remaining() < 3 {
-					return Err(WispError::PacketTooSmall);
-				}
+		match self {
+			Self::ServerBeforeClientInfo { users, required } => {
+				let user_len = bytes.get_u8();
+				let password_len = bytes.get_u16_le();
 
-				let username_len = payload.get_u8();
-				let password_len = payload.get_u16_le();
-				if payload.remaining() < (password_len + username_len as u16) as usize {
-					return Err(WispError::PacketTooSmall);
-				}
-
-				let username =
-					std::str::from_utf8(&payload.split_to(username_len as usize))?.to_string();
+				let user = std::str::from_utf8(&bytes.split_to(user_len as usize))?.to_string();
 				let password =
-					std::str::from_utf8(&payload.split_to(password_len as usize))?.to_string();
+					std::str::from_utf8(&bytes.split_to(password_len as usize))?.to_string();
 
-				let Some(user) = self.users.iter().find(|x| *x.0 == username) else {
-					return Err(WispError::PasswordExtensionCredsInvalid);
+				let valid = users.get(&user).map(|x| *x == password).unwrap_or(false);
+
+				*self = Self::ServerAfterClientInfo {
+					users: users.clone(),
+					required: *required,
 				};
 
-				if *user.1 != password {
-					return Err(WispError::PasswordExtensionCredsInvalid);
+				if !valid {
+					Err(WispError::PasswordExtensionCredsInvalid)
+				} else {
+					Ok(PasswordProtocolExtension::ServerAfterClientInfo {
+						chosen_user: user,
+						chosen_password: password,
+					}
+					.into())
 				}
+			}
+			Self::ServerAfterClientInfo { .. } => Err(WispError::ExtensionImplNotSupported),
+			Self::ClientBeforeServerInfo { creds } => {
+				let required = bytes.get_u8() != 0;
 
-				Ok(PasswordProtocolExtension {
-					username,
-					password,
-					role,
-				}
-				.into())
-			}
-			Role::Client => {
-				Ok(PasswordProtocolExtension::new_client(String::new(), String::new()).into())
-			}
-		}
-	}
+				*self = Self::ClientAfterServerInfo {
+					creds: creds.clone(),
+					required,
+				};
 
-	fn build_to_extension(&mut self, role: Role) -> Result<AnyProtocolExtension, WispError> {
-		Ok(match role {
-			Role::Server => PasswordProtocolExtension::new_server(),
-			Role::Client => {
-				PasswordProtocolExtension::new_client(self.username.clone(), self.password.clone())
+				Ok(PasswordProtocolExtension::ClientBeforeServerInfo.into())
 			}
+			Self::ClientAfterServerInfo { .. } => Err(WispError::ExtensionImplNotSupported),
 		}
-		.into())
 	}
 }

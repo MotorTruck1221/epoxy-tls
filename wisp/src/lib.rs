@@ -106,10 +106,21 @@ pub enum WispError {
 	/// The specified protocol extensions are not supported by the other side.
 	#[error("Protocol extensions {0:?} not supported")]
 	ExtensionsNotSupported(Vec<u8>),
+
 	/// The password authentication username/password was invalid.
 	#[error("Password protocol extension: Invalid username/password")]
 	PasswordExtensionCredsInvalid,
+	/// No password authentication username/password was provided.
+	#[error("Password protocol extension: No username/password provided")]
+	PasswordExtensionNoCreds,
+
+	/// The certificate authentication certificate type was unsupported.
+	#[error("Certificate authentication protocol extension: Invalid certificate type")]
+	CertAuthExtensionCertTypeInvalid,
 	/// The certificate authentication signature was invalid.
 	#[error("Certificate authentication protocol extension: Invalid signature")]
 	CertAuthExtensionSigInvalid,
+	/// No certificate authentication signing key was provided.
+	#[error("Password protocol extension: No signing key provided")]
+	CertAuthExtensionNoKey,
 }
