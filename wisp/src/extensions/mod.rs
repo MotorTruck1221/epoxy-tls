@@ -264,3 +264,51 @@ impl<T: ProtocolExtensionBuilder> From<T> for AnyProtocolExtensionBuilder {
 		Self::new(value)
 	}
 }
+
+/// Helper functions for `Vec<AnyProtocolExtensionBuilder>`
+pub trait ProtocolExtensionBuilderVecExt {
+	/// Returns a reference to the protocol extension builder specified, if it was found.
+	fn find_extension<T: ProtocolExtensionBuilder>(&self) -> Option<&T>;
+	/// Returns a mutable reference to the protocol extension builder specified, if it was found.
+	fn find_extension_mut<T: ProtocolExtensionBuilder>(&mut self) -> Option<&mut T>;
+
+	/// Removes any instances of the protocol extension builder specified, if it was found.
+	fn remove_extension<T: ProtocolExtensionBuilder>(&mut self);
+}
+
+impl ProtocolExtensionBuilderVecExt for Vec<AnyProtocolExtensionBuilder> {
+	fn find_extension<T: ProtocolExtensionBuilder>(&self) -> Option<&T> {
+		self.iter().find_map(|x| x.downcast_ref::<T>())
+	}
+	fn find_extension_mut<T: ProtocolExtensionBuilder>(&mut self) -> Option<&mut T> {
+		self.iter_mut().find_map(|x| x.downcast_mut::<T>())
+	}
+
+	fn remove_extension<T: ProtocolExtensionBuilder>(&mut self) {
+		self.retain(|x| x.downcast_ref::<T>().is_none());
+	}
+}
+
+/// Helper functions for `Vec<AnyProtocolExtension>`
+pub trait ProtocolExtensionVecExt {
+	/// Returns a reference to the protocol extension specified, if it was found.
+	fn find_extension<T: ProtocolExtension>(&self) -> Option<&T>;
+	/// Returns a mutable reference to the protocol extension specified, if it was found.
+	fn find_extension_mut<T: ProtocolExtension>(&mut self) -> Option<&mut T>;
+
+	/// Removes any instances of the protocol extension specified, if it was found.
+	fn remove_extension<T: ProtocolExtension>(&mut self);
+}
+
+impl ProtocolExtensionVecExt for Vec<AnyProtocolExtension> {
+	fn find_extension<T: ProtocolExtension>(&self) -> Option<&T> {
+		self.iter().find_map(|x| x.downcast_ref::<T>())
+	}
+	fn find_extension_mut<T: ProtocolExtension>(&mut self) -> Option<&mut T> {
+		self.iter_mut().find_map(|x| x.downcast_mut::<T>())
+	}
+
+	fn remove_extension<T: ProtocolExtension>(&mut self) {
+		self.retain(|x| x.downcast_ref::<T>().is_none());
+	}
+}
