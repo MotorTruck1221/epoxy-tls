@@ -76,6 +76,18 @@ pub enum MotdProtocolExtensionBuilder {
 	Client,
 }
 
+impl MotdProtocolExtensionBuilder {
+	/// Create a new server variant of the MOTD protocol extension builder.
+	pub fn new_server(motd: String) -> Self {
+		Self::Server(motd)
+	}
+
+	/// Create a new client variant of the MOTD protocol extension builder.
+	pub fn new_client() -> Self {
+		Self::Client
+	}
+}
+
 impl ProtocolExtensionBuilder for MotdProtocolExtensionBuilder {
 	fn get_id(&self) -> u8 {
 		MotdProtocolExtension::ID

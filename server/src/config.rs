@@ -14,7 +14,7 @@ use wisp_mux::{
 		udp::UdpProtocolExtensionBuilder,
 		AnyProtocolExtensionBuilder,
 	},
-	WispV2Extensions,
+	WispV2Handshake,
 };
 
 use crate::{handle::wisp::utils::get_certificates_from_paths, CLI, CONFIG, RESOLVER};
@@ -346,7 +346,7 @@ impl Default for WispConfig {
 }
 
 impl WispConfig {
-	pub async fn to_opts(&self) -> anyhow::Result<(Option<WispV2Extensions>, Vec<u8>, u32)> {
+	pub async fn to_opts(&self) -> anyhow::Result<(Option<WispV2Handshake>, Vec<u8>, u32)> {
 		if self.wisp_v2 {
 			let mut extensions: Vec<AnyProtocolExtensionBuilder> = Vec::new();
 			let mut required_extensions: Vec<u8> = Vec::new();
@@ -391,7 +391,7 @@ impl WispConfig {
 			}
 
 			Ok((
-				Some(WispV2Extensions::new(extensions)),
+				Some(WispV2Handshake::new(extensions)),
 				required_extensions,
 				self.buffer_size,
 			))

@@ -38,7 +38,7 @@ use wisp_mux::{
 		udp::{UdpProtocolExtension, UdpProtocolExtensionBuilder},
 		AnyProtocolExtensionBuilder,
 	},
-	ClientMux, StreamType, WispError, WispV2Extensions,
+	ClientMux, StreamType, WispError, WispV2Handshake,
 };
 
 #[derive(Debug)]
@@ -198,7 +198,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			.await?
 			.with_no_required_extensions()
 	} else {
-		ClientMux::create(rx, tx, Some(WispV2Extensions::new(extensions)))
+		ClientMux::create(rx, tx, Some(WispV2Handshake::new(extensions)))
 			.await?
 			.with_required_extensions(extension_ids.as_slice())
 			.await?

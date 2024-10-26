@@ -123,14 +123,19 @@ where
 	}
 }
 
-type WispV2ClosureResult = Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>;
 /// Wisp V2 handshake and protocol extension settings wrapper struct.
-pub struct WispV2Extensions {
+pub struct WispV2Handshake {
 	builders: Vec<AnyProtocolExtensionBuilder>,
-	closure: Box<dyn Fn(&mut Vec<AnyProtocolExtensionBuilder>) -> WispV2ClosureResult + Send>,
+	#[expect(clippy::type_complexity)]
+	closure: Box<
+		dyn Fn(
+				&mut Vec<AnyProtocolExtensionBuilder>,
+			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
+			+ Send,
+	>,
 }
 
-impl WispV2Extensions {
+impl WispV2Handshake {
 	/// Create a Wisp V2 settings struct with no middleware.
 	pub fn new(builders: Vec<AnyProtocolExtensionBuilder>) -> Self {
 		Self {
@@ -142,7 +147,11 @@ impl WispV2Extensions {
 	/// Create a Wisp V2 settings struct with some middleware.
 	pub fn new_with_middleware<C>(builders: Vec<AnyProtocolExtensionBuilder>, closure: C) -> Self
 	where
-		C: Fn(&mut Vec<AnyProtocolExtensionBuilder>) -> WispV2ClosureResult + Send + 'static,
+		C: Fn(
+				&mut Vec<AnyProtocolExtensionBuilder>,
+			) -> Pin<Box<dyn Future<Output = Result<(), WispError>> + Sync + Send>>
+			+ Send
+			+ 'static,
 	{
 		Self {
 			builders,

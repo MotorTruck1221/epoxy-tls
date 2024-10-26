@@ -17,7 +17,7 @@ use webpki_roots::TLS_SERVER_ROOTS;
 use wisp_mux::{
 	extensions::{udp::UdpProtocolExtensionBuilder, AnyProtocolExtensionBuilder},
 	ws::{WebSocketRead, WebSocketWrite},
-	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType, WispV2Extensions,
+	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType, WispV2Handshake,
 };
 
 use crate::{
@@ -119,7 +119,7 @@ impl StreamProvider {
 				UdpProtocolExtensionBuilder,
 			)];
 		let extensions = if self.wisp_v2 {
-			Some(WispV2Extensions::new(extensions_vec))
+			Some(WispV2Handshake::new(extensions_vec))
 		} else {
 			None
 		};

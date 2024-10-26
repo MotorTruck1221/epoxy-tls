@@ -20,15 +20,15 @@ use crate::{
 
 use super::{
 	get_supported_extensions, validate_continue_packet, Multiplexor, MuxResult,
-	WispHandshakeResult, WispHandshakeResultKind, WispV2Extensions,
+	WispHandshakeResult, WispHandshakeResultKind, WispV2Handshake,
 };
 
 async fn handshake<R: WebSocketRead>(
 	rx: &mut R,
 	tx: &LockedWebSocketWrite,
-	v2_info: Option<WispV2Extensions>,
+	v2_info: Option<WispV2Handshake>,
 ) -> Result<(WispHandshakeResult, u32), WispError> {
-	if let Some(WispV2Extensions {
+	if let Some(WispV2Handshake {
 		mut builders,
 		closure,
 	}) = v2_info
@@ -100,7 +100,7 @@ impl ClientMux {
 	pub async fn create<R, W>(
 		mut rx: R,
 		tx: W,
-		wisp_v2: Option<WispV2Extensions>,
+		wisp_v2: Option<WispV2Handshake>,
 	) -> Result<MuxResult<ClientMux, impl Future<Output = Result<(), WispError>> + Send>, WispError>
 	where
 		R: WebSocketRead + Send,
