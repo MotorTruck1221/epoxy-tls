@@ -66,8 +66,8 @@ bitflags::bitflags! {
 pub struct VerifyKey {
 	/// Certificate type of the keypair.
 	pub cert_type: SupportedCertificateTypes,
-	/// SHA-512 hash of the public key.
-	pub hash: [u8; 64],
+	/// SHA-256 hash of the public key.
+	pub hash: [u8; 32],
 	/// Verifier.
 	pub verifier: Arc<dyn Verifier<Signature> + Sync + Send>,
 }
@@ -76,7 +76,7 @@ impl VerifyKey {
 	/// Create a new ED25519 verification key.
 	pub fn new_ed25519(
 		verifier: Arc<dyn Verifier<Signature> + Sync + Send>,
-		hash: [u8; 64],
+		hash: [u8; 32],
 	) -> Self {
 		Self {
 			cert_type: SupportedCertificateTypes::Ed25519,
@@ -91,14 +91,14 @@ impl VerifyKey {
 pub struct SigningKey {
 	/// Certificate type of the keypair.
 	pub cert_type: SupportedCertificateTypes,
-	/// SHA-512 hash of the public key.
-	pub hash: [u8; 64],
+	/// SHA-256 hash of the public key.
+	pub hash: [u8; 32],
 	/// Signer.
 	pub signer: Arc<dyn Signer<Signature> + Sync + Send>,
 }
 impl SigningKey {
 	/// Create a new ED25519 signing key.
-	pub fn new_ed25519(signer: Arc<dyn Signer<Signature> + Sync + Send>, hash: [u8; 64]) -> Self {
+	pub fn new_ed25519(signer: Arc<dyn Signer<Signature> + Sync + Send>, hash: [u8; 32]) -> Self {
 		Self {
 			cert_type: SupportedCertificateTypes::Ed25519,
 			hash,
@@ -123,8 +123,8 @@ pub enum CertAuthProtocolExtension {
 	Client {
 		/// Chosen certificate type.
 		cert_type: SupportedCertificateTypes,
-		/// Hash of public key.
-		hash: [u8; 64],
+		/// SHA-256 hash of public key.
+		hash: [u8; 32],
 		/// Signature of challenge.
 		signature: Bytes,
 	},

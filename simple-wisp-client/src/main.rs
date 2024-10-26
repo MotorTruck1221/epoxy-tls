@@ -11,7 +11,7 @@ use hyper::{
 	Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256};
 use simple_moving_average::{SingleSumSMA, SMA};
 use std::{
 	error::Error,
@@ -113,9 +113,9 @@ async fn get_cert(path: PathBuf) -> Result<SigningKey, Box<dyn Error + Sync + Se
 	let signer = ed25519_dalek::SigningKey::from_pkcs8_pem(&data)?;
 	let binary_key = signer.verifying_key().to_bytes();
 
-	let mut hasher = Sha512::new();
+	let mut hasher = Sha256::new();
 	hasher.update(binary_key);
-	let hash: [u8; 64] = hasher.finalize().into();
+	let hash: [u8; 32] = hasher.finalize().into();
 	Ok(SigningKey::new_ed25519(Arc::new(signer), hash))
 }
 
