@@ -303,7 +303,7 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 				// validate and parse response
 				let cert_type = SupportedCertificateTypes::from_bits(bytes.get_u8())
 					.ok_or(WispError::CertAuthExtensionSigInvalid)?;
-				let hash = bytes.split_to(64);
+				let hash = bytes.split_to(32);
 				let sig = Signature::from_slice(&bytes).map_err(CertAuthError::from)?;
 				let is_valid = verifiers
 					.iter()
