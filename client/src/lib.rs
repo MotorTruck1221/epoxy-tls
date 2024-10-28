@@ -367,10 +367,12 @@ impl EpoxyClient {
 
 					Box::pin(async move {
 						let (write, read) = WebSocketWrapper::connect(&wisp_url, &ws_protocols)?;
-						if !write.wait_for_open().await {
-							return Err(EpoxyError::WebSocketConnectFailed(
-								"websocket did not open".to_string(),
-							));
+						while write.inner.ready_state() == 0 {
+							if !write.wait_for_open().await {
+								return Err(EpoxyError::WebSocketConnectFailed(
+									"websocket did not open".to_string(),
+								));
+							}
 						}
 						Ok((
 							Box::new(read) as Box<dyn WebSocketRead + Send>,

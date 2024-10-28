@@ -43,7 +43,7 @@ pub enum WebSocketMessage {
 }
 
 pub struct WebSocketWrapper {
-	inner: SendWrapper<WebSocket>,
+	pub inner: SendWrapper<WebSocket>,
 	open_event: Arc<Event>,
 	error_event: Arc<Event>,
 	close_event: Arc<Event>,
@@ -124,7 +124,10 @@ impl WebSocketWrapper {
 		let onerror_close = close_event.clone();
 		let onerror_event = error_event.clone();
 		let onerror = Closure::wrap(Box::new(move |e| {
-			let _ = onerror_tx.send(WebSocketMessage::Error(WebSocketError::Unknown(format!("{:?}", e))));
+			let _ = onerror_tx.send(WebSocketMessage::Error(WebSocketError::Unknown(format!(
+				"{:?}",
+				e
+			))));
 			onerror_closed.store(true, Ordering::Release);
 			onerror_close.notify(usize::MAX);
 			onerror_event.notify(usize::MAX);
