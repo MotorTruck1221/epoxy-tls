@@ -641,6 +641,9 @@ impl EpoxyClient {
 
 		if let Some(headers) = headers {
 			for hdr in headers {
+				if ["host"].contains(&hdr[0].to_lowercase().as_str()) {
+					continue;
+				}
 				headers_map.insert(
 					HeaderName::from_str(&hdr[0])?,
 					HeaderValue::from_str(&hdr[1])?,
