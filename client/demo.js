@@ -13,7 +13,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	const should_reconnect_test = params.has("reconnect_test");
 	const should_perf2_test = params.has("perf2_test");
 	const should_wisptransport = params.has("wisptransport");
-	const test_url = params.get("url");
+	const test_url = params.get("url") || "https://httpbin.org/get";
 	const wisp_url = params.get("wisp") || "ws://localhost:4000/";
 	const wisp_v1 = params.has("v1");
 	const wisp_udp = params.has("udp_extension");
@@ -63,14 +63,14 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 
 	const test_mux = async (url) => {
 		const t0 = performance.now();
-		await epoxy_client.fetch(url);
+		await epoxy_client.fetch(url).then(r=>r.text());
 		const t1 = performance.now();
 		return t1 - t0;
 	};
 
 	const test_native = async (url) => {
 		const t0 = performance.now();
-		await fetch(url, { cache: "no-store" });
+		await fetch(url, { cache: "no-store" }).then(r=>r.text());
 		const t1 = performance.now();
 		return t1 - t0;
 	};
@@ -113,14 +113,14 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			let total_mux = 0;
 			await Promise.all([...Array(num_tests).keys()].map(async i => {
 				log(`running mux test ${i}`);
-				return await test_mux("https://httpbin.org/get");
+				return await test_mux(test_url);
 			})).then((vals) => { total_mux = vals.reduce((acc, x) => acc + x, 0) });
 			total_mux = total_mux / num_tests;
 
 			let total_native = 0;
 			await Promise.all([...Array(num_tests).keys()].map(async i => {
 				log(`running native test ${i}`);
-				return await test_native("https://httpbin.org/get");
+				return await test_native(test_url);
 			})).then((vals) => { total_native = vals.reduce((acc, x) => acc + x, 0) });
 			total_native = total_native / num_tests;
 
@@ -137,14 +137,14 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 		let total_mux = 0;
 		await Promise.all([...Array(num_tests).keys()].map(async i => {
 			log(`running mux test ${i}`);
-			return await test_mux("https://httpbin.org/get");
+			return await test_mux(test_url);
 		})).then((vals) => { total_mux = vals.reduce((acc, x) => acc + x, 0) });
 		total_mux = total_mux / num_tests;
 
 		let total_native = 0;
 		await Promise.all([...Array(num_tests).keys()].map(async i => {
 			log(`running native test ${i}`);
-			return await test_native("https://httpbin.org/get");
+			return await test_native(test_url);
 		})).then((vals) => { total_native = vals.reduce((acc, x) => acc + x, 0) });
 		total_native = total_native / num_tests;
 
@@ -158,14 +158,14 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			let total_mux = 0;
 			for (const i of Array(num_tests).keys()) {
 				log(`running mux test ${i}`);
-				total_mux += await test_mux("https://httpbin.org/get");
+				total_mux += await test_mux(test_url);
 			}
 			total_mux = total_mux / num_tests;
 
 			let total_native = 0;
 			for (const i of Array(num_tests).keys()) {
 				log(`running native test ${i}`);
-				total_native += await test_native("https://httpbin.org/get");
+				total_native += await test_native(test_url);
 			}
 			total_native = total_native / num_tests;
 
@@ -182,14 +182,14 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 		let total_mux = 0;
 		for (const i of Array(num_tests).keys()) {
 			log(`running mux test ${i}`);
-			total_mux += await test_mux("https://httpbin.org/get");
+			total_mux += await test_mux(test_url);
 		}
 		total_mux = total_mux / num_tests;
 
 		let total_native = 0;
 		for (const i of Array(num_tests).keys()) {
 			log(`running native test ${i}`);
-			total_native += await test_native("https://httpbin.org/get");
+			total_native += await test_native(test_url);
 		}
 		total_native = total_native / num_tests;
 
@@ -269,7 +269,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	} else if (should_reconnect_test) {
 		while (true) {
 			try {
-				await epoxy_client.fetch("https://httpbin.org/get");
+				await epoxy_client.fetch(test_url);
 			} catch (e) { console.error(e) }
 			log("sent req");
 			await (new Promise((res, _) => setTimeout(res, 500)));
@@ -282,7 +282,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			let total_mux = 0;
 			await Promise.all([...Array(num_inner_tests).keys()].map(async i => {
 				log(`running mux test ${i}`);
-				return await test_mux("https://httpbin.org/get");
+				return await test_mux(test_url);
 			})).then((vals) => { total_mux = vals.reduce((acc, x) => acc + x, 0) });
 			total_mux = total_mux / num_inner_tests;
 
@@ -293,7 +293,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 		log(`total avg mux (${num_outer_tests} tests of ${num_inner_tests} reqs): ${total_mux_multi} ms or ${total_mux_multi / 1000} s`);
 	} else {
 		console.time();
-		let resp = await epoxy_client.fetch(test_url || "https://www.example.com/");
+		let resp = await epoxy_client.fetch(test_url);
 		console.timeEnd();
 		console.log(resp, resp.rawHeaders);
 		log(await resp.text());
