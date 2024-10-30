@@ -11,7 +11,6 @@ use futures::channel::oneshot;
 
 use crate::{
 	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension},
-	inner::{MuxInner, WsEvent},
 	mux::send_info_packet,
 	ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	CloseReason, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role, StreamType,
@@ -19,8 +18,10 @@ use crate::{
 };
 
 use super::{
-	get_supported_extensions, validate_continue_packet, Multiplexor, MuxResult,
-	WispHandshakeResult, WispHandshakeResultKind, WispV2Handshake,
+	get_supported_extensions,
+	inner::{MuxInner, WsEvent},
+	validate_continue_packet, Multiplexor, MuxResult, WispHandshakeResult, WispHandshakeResultKind,
+	WispV2Handshake,
 };
 
 async fn handshake<R: WebSocketRead>(

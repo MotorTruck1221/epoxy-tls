@@ -3,9 +3,7 @@ mod sink_unfold;
 pub use compat::*;
 
 use crate::{
-	inner::WsEvent,
-	ws::{Frame, LockedWebSocketWrite, Payload},
-	AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError,
+	inner::WsEvent, ws::{Frame, LockedWebSocketWrite, Payload}, AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError
 };
 
 use bytes::{BufMut, Bytes, BytesMut};

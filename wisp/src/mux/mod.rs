@@ -1,4 +1,5 @@
 mod client;
+pub(crate) mod inner;
 mod server;
 use std::{future::Future, pin::Pin};
 

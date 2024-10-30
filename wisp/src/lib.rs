@@ -11,7 +11,6 @@ mod fastwebsockets;
 #[cfg(feature = "generic_stream")]
 #[cfg_attr(docsrs, doc(cfg(feature = "generic_stream")))]
 pub mod generic;
-mod inner;
 mod mux;
 mod packet;
 mod stream;
