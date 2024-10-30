@@ -12,6 +12,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	const should_udp_test = params.has("udp_test");
 	const should_reconnect_test = params.has("reconnect_test");
 	const should_perf2_test = params.has("perf2_test");
+	const should_duplex_test = params.has("duplex_test");
 	const should_wisptransport = params.has("wisptransport");
 	const test_url = params.get("url") || "https://httpbin.org/get";
 	const wisp_url = params.get("wisp") || "ws://localhost:4000/";
@@ -294,7 +295,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			}
 			total_mux_multi = total_mux_multi / num_outer_tests;
 			log(`total avg mux (${num_outer_tests} tests of ${num_inner_tests} reqs): ${total_mux_multi} ms or ${total_mux_multi / 1000} s`);
-		} else {
+		} else if (should_duplex_test) {
 			const intervalStream = new ReadableStream({
 				start(c) {
 					let count = 0;
@@ -310,14 +311,13 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 				},
 			}).pipeThrough(new TextEncoderStream());
 
-			const resp = await epoxy_client.fetch("https://full-duplex-server.deno.dev/", {
+			const resp = await epoxy_client.fetch("https://httpbin.org/redirect-to?url=https://full-duplex-server.deno.dev", {
 				method: "POST",
 				duplex: "half",
-				redirect: "manual",
 				body: intervalStream,
 			});
 
-			console.log("foo");
+			console.log("foo", resp);
 
 			const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
 
@@ -328,6 +328,12 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			}
 
 			console.log("done!");
+		} else {
+			console.time();
+			let resp = await epoxy_client.fetch(test_url);
+			console.log(resp, resp.rawHeaders);
+			log(await resp.arrayBuffer());
+			console.timeEnd();
 		}
 		log("done");
 	} catch (err) {

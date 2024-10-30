@@ -455,7 +455,24 @@ pub enum MaybeStreamingBody {
 
 pub struct StreamingInnerBody(
 	Pin<Box<dyn Stream<Item = Result<http_body::Frame<Bytes>, std::io::Error>> + Send>>,
+	SendWrapper<ReadableStream>,
 );
+impl StreamingInnerBody {
+	pub fn from_teed(a: ReadableStream, b: ReadableStream) -> Result<Self, EpoxyError> {
+		let reader = a
+			.try_into_stream()
+			.map_err(|x| EpoxyError::StreamingBodyConvertFailed(format!("{:?}", x)))?;
+		let reader = reader
+			.then(|x| async {
+				Ok::<Bytes, JsValue>(Bytes::from(convert_body(x?).await?.0.to_vec()))
+			})
+			.map_ok(http_body::Frame::data);
+		let reader = reader.map_err(|x| std::io::Error::other(format!("{:?}", x)));
+		let reader = Box::pin(SendWrapper::new(reader));
+
+		Ok(Self(reader, SendWrapper::new(b)))
+	}
+}
 impl Stream for StreamingInnerBody {
 	type Item = Result<http_body::Frame<Bytes>, std::io::Error>;
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -467,8 +484,20 @@ impl Stream for StreamingInnerBody {
 }
 impl Clone for StreamingInnerBody {
 	fn clone(&self) -> Self {
-		console_error!("epoxy internal error: cloning streaming request body is not allowed");
-		unreachable!();
+		match ReadableStream::from_raw(self.1.as_raw().clone())
+			.try_tee()
+			.map_err(|x| EpoxyError::StreamingBodyTeeFailed(format!("{:?}", x)))
+			.and_then(|(a, b)| StreamingInnerBody::from_teed(a, b))
+		{
+			Ok(x) => x,
+			Err(x) => {
+				console_error!(
+					"epoxy internal error: failed to clone streaming body: {:?}",
+					x
+				);
+				unreachable!("failed to clone streaming body");
+			}
+		}
 	}
 }
 
@@ -478,21 +507,13 @@ impl MaybeStreamingBody {
 	pub fn into_httpbody(self) -> Result<StreamingBody, EpoxyError> {
 		match self {
 			Self::Streaming(x) => {
-				let reader = ReadableStream::from_raw(x);
-				let reader = reader
-					.try_into_stream()
-					.map_err(|x| EpoxyError::StreamingBodyConvertFailed(format!("{:?}", x)))?;
+				let (a, b) = ReadableStream::from_raw(x)
+					.try_tee()
+					.map_err(|x| EpoxyError::StreamingBodyTeeFailed(format!("{:?}", x)))?;
 
-				let reader = reader
-					.then(|x| async {
-						Ok::<Bytes, JsValue>(Bytes::from(convert_body(x?).await?.0.to_vec()))
-					})
-					.map_ok(http_body::Frame::data);
-				let reader = reader.map_err(|x| std::io::Error::other(format!("{:?}", x)));
-
-				Ok(Either::Left(StreamBody::new(StreamingInnerBody(Box::pin(
-					SendWrapper::new(reader),
-				)))))
+				Ok(Either::Left(StreamBody::new(
+					StreamingInnerBody::from_teed(a, b)?,
+				)))
 			}
 			Self::Static(x) => Ok(Either::Right(Full::new(Bytes::from(x.to_vec())))),
 		}

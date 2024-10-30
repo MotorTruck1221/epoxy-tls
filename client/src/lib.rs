@@ -18,7 +18,7 @@ use http::{
 	HeaderName, HeaderValue, Method, Request, Response,
 };
 use http_body::Body;
-use http_body_util::{BodyDataStream, BodyExt, Full};
+use http_body_util::{BodyDataStream, Full};
 use hyper::{body::Incoming, Uri};
 use hyper_util_wasm::client::legacy::Client;
 #[cfg(feature = "full")]
@@ -29,8 +29,8 @@ use stream_provider::{StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_streaming_body, entries_of_object, from_entries,
-	is_null_body, is_redirect, object_get, object_set, object_truthy, ws_protocol,
-	MaybeStreamingBody, StreamingBody, UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
+	is_null_body, is_redirect, object_get, object_set, object_truthy, ws_protocol, StreamingBody,
+	UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -166,6 +166,8 @@ pub enum EpoxyError {
 	ResponseNewFailed,
 	#[error("Failed to convert streaming body: {0}")]
 	StreamingBodyConvertFailed(String),
+	#[error("Failed to tee streaming body: {0}")]
+	StreamingBodyTeeFailed(String),
 	#[error("Failed to collect streaming body: {0:?} ({0})")]
 	StreamingBodyCollectFailed(Box<dyn Error + Sync + Send>),
 }
@@ -605,15 +607,7 @@ impl EpoxyClient {
 					.await
 					.map_err(|_| EpoxyError::InvalidRequestBody)?;
 				body_content_type = content_type;
-				if matches!(body, MaybeStreamingBody::Streaming(_)) && request_redirect {
-					console_warn!("epoxy: streaming request body + redirect unsupported");
-					// collect body instead
-					http_body_util::Either::Right(Full::new(
-						body.into_httpbody()?.collect().await.map_err(EpoxyError::StreamingBodyCollectFailed)?.to_bytes(),
-					))
-				} else {
-					body.into_httpbody()?
-				}
+				body.into_httpbody()?
 			}
 			None => http_body_util::Either::Right(Full::new(Bytes::new())),
 		};
@@ -673,7 +667,6 @@ impl EpoxyClient {
 		if matches!(request_method, Method::POST | Method::PUT | Method::PATCH) && body_empty {
 			headers_map.insert(CONTENT_LENGTH, 0.into());
 		}
-
 
 		let (mut response, response_uri, redirected) = self
 			.send_req(request_builder.body(body)?, request_redirect)
