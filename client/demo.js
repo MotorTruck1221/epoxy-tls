@@ -295,11 +295,39 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			total_mux_multi = total_mux_multi / num_outer_tests;
 			log(`total avg mux (${num_outer_tests} tests of ${num_inner_tests} reqs): ${total_mux_multi} ms or ${total_mux_multi / 1000} s`);
 		} else {
-			console.time();
-			let resp = await epoxy_client.fetch(test_url);
-			console.log(resp, resp.rawHeaders);
-			log(await resp.arrayBuffer());
-			console.timeEnd();
+			const intervalStream = new ReadableStream({
+				start(c) {
+					let count = 0;
+					const timer = setInterval(() => {
+						console.log("sent!");
+						c.enqueue("Hello\n");
+						if (count === 5) {
+							clearInterval(timer);
+							c.close();
+						}
+						count++;
+					}, 1000);
+				},
+			}).pipeThrough(new TextEncoderStream());
+
+			const resp = await epoxy_client.fetch("https://full-duplex-server.deno.dev/", {
+				method: "POST",
+				duplex: "half",
+				redirect: "manual",
+				body: intervalStream,
+			});
+
+			console.log("foo");
+
+			const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
+
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				console.log(value);
+			}
+
+			console.log("done!");
 		}
 		log("done");
 	} catch (err) {

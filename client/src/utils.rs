@@ -17,6 +17,7 @@ use futures_rustls::{
 };
 use futures_util::{ready, AsyncRead, AsyncWrite, Future, Stream, StreamExt, TryStreamExt};
 use http::{HeaderValue, Uri};
+use http_body_util::{Either, Full, StreamBody};
 use hyper::rt::Executor;
 use js_sys::{Array, ArrayBuffer, JsString, Object, Uint8Array};
 use pin_project_lite::pin_project;
@@ -38,6 +39,9 @@ extern "C" {
 	#[wasm_bindgen(js_namespace = console, js_name = log)]
 	pub fn js_console_log(s: &str);
 
+	#[wasm_bindgen(js_namespace = console, js_name = warn)]
+	pub fn js_console_warn(s: &str);
+
 	#[wasm_bindgen(js_namespace = console, js_name = error)]
 	pub fn js_console_error(s: &str);
 }
@@ -46,6 +50,12 @@ extern "C" {
 macro_rules! console_log {
 	($($expr:expr),*) => {
 		$crate::utils::js_console_log(&format!($($expr),*));
+	};
+}
+#[macro_export]
+macro_rules! console_warn {
+	($($expr:expr),*) => {
+		$crate::utils::js_console_warn(&format!($($expr),*));
 	};
 }
 
@@ -375,6 +385,18 @@ export async function convert_body_inner(body) {
 	return [new Uint8Array(await req.arrayBuffer()), type];
 }
 
+export async function convert_streaming_body_inner(body) {
+	try {
+		let req = new Request("", { method: "POST", body });
+		let type = req.headers.get("content-type");
+		return [false, new Uint8Array(await req.arrayBuffer()), type];
+	} catch(x) {
+		let req = new Request("", { method: "POST", duplex: "half", body });
+		let type = req.headers.get("content-type");
+		return [true, req.body, type];
+	}
+}
+
 export function entries_of_object_inner(obj) {
 	return Object.entries(obj).map(x => x.map(String));
 }
@@ -408,6 +430,8 @@ extern "C" {
 
 	#[wasm_bindgen(catch)]
 	async fn convert_body_inner(val: JsValue) -> Result<JsValue, JsValue>;
+	#[wasm_bindgen(catch)]
+	async fn convert_streaming_body_inner(val: JsValue) -> Result<JsValue, JsValue>;
 
 	fn entries_of_object_inner(obj: &Object) -> Vec<Array>;
 	pub fn define_property(obj: &Object, key: &str, val: JsValue);
@@ -420,8 +444,74 @@ extern "C" {
 
 pub async fn convert_body(val: JsValue) -> Result<(Uint8Array, Option<String>), JsValue> {
 	let req: Array = convert_body_inner(val).await?.unchecked_into();
-	let str: Option<JsString> = object_truthy(req.at(1)).map(|x| x.unchecked_into());
-	Ok((req.at(0).unchecked_into(), str.map(Into::into)))
+	let content_type: Option<JsString> = object_truthy(req.at(1)).map(|x| x.unchecked_into());
+	Ok((req.at(0).unchecked_into(), content_type.map(Into::into)))
+}
+
+pub enum MaybeStreamingBody {
+	Streaming(web_sys::ReadableStream),
+	Static(Uint8Array),
+}
+
+pub struct StreamingInnerBody(
+	Pin<Box<dyn Stream<Item = Result<http_body::Frame<Bytes>, std::io::Error>> + Send>>,
+);
+impl Stream for StreamingInnerBody {
+	type Item = Result<http_body::Frame<Bytes>, std::io::Error>;
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		self.0.poll_next_unpin(cx)
+	}
+	fn size_hint(&self) -> (usize, Option<usize>) {
+		self.0.size_hint()
+	}
+}
+impl Clone for StreamingInnerBody {
+	fn clone(&self) -> Self {
+		console_error!("epoxy internal error: cloning streaming request body is not allowed");
+		unreachable!();
+	}
+}
+
+pub type StreamingBody = Either<StreamBody<StreamingInnerBody>, Full<Bytes>>;
+
+impl MaybeStreamingBody {
+	pub fn into_httpbody(self) -> Result<StreamingBody, EpoxyError> {
+		match self {
+			Self::Streaming(x) => {
+				let reader = ReadableStream::from_raw(x);
+				let reader = reader
+					.try_into_stream()
+					.map_err(|x| EpoxyError::StreamingBodyConvertFailed(format!("{:?}", x)))?;
+
+				let reader = reader
+					.then(|x| async {
+						Ok::<Bytes, JsValue>(Bytes::from(convert_body(x?).await?.0.to_vec()))
+					})
+					.map_ok(http_body::Frame::data);
+				let reader = reader.map_err(|x| std::io::Error::other(format!("{:?}", x)));
+
+				Ok(Either::Left(StreamBody::new(StreamingInnerBody(Box::pin(
+					SendWrapper::new(reader),
+				)))))
+			}
+			Self::Static(x) => Ok(Either::Right(Full::new(Bytes::from(x.to_vec())))),
+		}
+	}
+}
+
+pub async fn convert_streaming_body(
+	val: JsValue,
+) -> Result<(MaybeStreamingBody, Option<String>), JsValue> {
+	let req: Array = convert_streaming_body_inner(val).await?.unchecked_into();
+	let content_type: Option<JsString> = object_truthy(req.at(2)).map(|x| x.unchecked_into());
+
+	let body = if req.at(0).is_truthy() {
+		MaybeStreamingBody::Streaming(req.at(1).unchecked_into())
+	} else {
+		MaybeStreamingBody::Static(req.at(1).unchecked_into())
+	};
+
+	Ok((body, content_type.map(Into::into)))
 }
 
 pub fn entries_of_object(obj: &Object) -> Vec<Vec<String>> {

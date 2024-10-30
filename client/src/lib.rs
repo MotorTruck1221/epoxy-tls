@@ -1,5 +1,5 @@
 #![feature(let_chains, impl_trait_in_assoc_type)]
-use std::{str::FromStr, sync::Arc};
+use std::{error::Error, str::FromStr, sync::Arc};
 
 #[cfg(feature = "full")]
 use async_compression::futures::bufread as async_comp;
@@ -11,13 +11,14 @@ use futures_util::TryStreamExt;
 use http::{
 	header::{
 		InvalidHeaderName, InvalidHeaderValue, ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH,
-		CONTENT_TYPE, USER_AGENT,
+		CONTENT_TYPE, LOCATION, USER_AGENT,
 	},
 	method::InvalidMethod,
 	uri::{InvalidUri, InvalidUriParts},
 	HeaderName, HeaderValue, Method, Request, Response,
 };
-use http_body_util::BodyDataStream;
+use http_body::Body;
+use http_body_util::{BodyDataStream, BodyExt, Full};
 use hyper::{body::Incoming, Uri};
 use hyper_util_wasm::client::legacy::Client;
 #[cfg(feature = "full")]
@@ -27,9 +28,9 @@ use send_wrapper::SendWrapper;
 use stream_provider::{StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
-	asyncread_to_readablestream, convert_body, entries_of_object, from_entries, is_null_body,
-	is_redirect, object_get, object_set, object_truthy, ws_protocol, UriExt, WasmExecutor,
-	WispTransportRead, WispTransportWrite,
+	asyncread_to_readablestream, convert_streaming_body, entries_of_object, from_entries,
+	is_null_body, is_redirect, object_get, object_set, object_truthy, ws_protocol,
+	MaybeStreamingBody, StreamingBody, UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -91,8 +92,6 @@ impl TryFrom<EpoxyUrlInput> for Uri {
 		}
 	}
 }
-
-type HttpBody = http_body_util::Full<Bytes>;
 
 #[derive(Debug, Error)]
 pub enum EpoxyError {
@@ -165,6 +164,10 @@ pub enum EpoxyError {
 	ResponseHeadersFromEntriesFailed,
 	#[error("Failed to construct response object")]
 	ResponseNewFailed,
+	#[error("Failed to convert streaming body: {0}")]
+	StreamingBodyConvertFailed(String),
+	#[error("Failed to collect streaming body: {0:?} ({0})")]
+	StreamingBodyCollectFailed(Box<dyn Error + Sync + Send>),
 }
 
 impl EpoxyError {
@@ -219,10 +222,9 @@ impl From<CloseReason> for EpoxyError {
 	}
 }
 
-#[derive(Debug)]
 enum EpoxyResponse {
 	Success(Response<Incoming>),
-	Redirect((Response<Incoming>, http::Request<HttpBody>)),
+	Redirect((Response<Incoming>, http::Request<StreamingBody>)),
 }
 
 #[cfg(feature = "full")]
@@ -327,7 +329,7 @@ impl EpoxyHandlers {
 #[wasm_bindgen(inspectable)]
 pub struct EpoxyClient {
 	stream_provider: Arc<StreamProvider>,
-	client: Client<StreamProviderService, HttpBody>,
+	client: Client<StreamProviderService, StreamingBody>,
 
 	certs_tampered: bool,
 
@@ -520,7 +522,7 @@ impl EpoxyClient {
 
 	async fn send_req_inner(
 		&self,
-		req: http::Request<HttpBody>,
+		req: http::Request<StreamingBody>,
 		should_redirect: bool,
 	) -> Result<EpoxyResponse, EpoxyError> {
 		let new_req = if should_redirect {
@@ -534,7 +536,7 @@ impl EpoxyClient {
 			Ok(res) => {
 				if is_redirect(res.status().as_u16())
 					&& let Some(mut new_req) = new_req
-					&& let Some(location) = res.headers().get("Location")
+					&& let Some(location) = res.headers().get(LOCATION)
 					&& let Ok(redirect_url) = new_req.uri().get_redirect(location)
 				{
 					*new_req.uri_mut() = redirect_url;
@@ -549,7 +551,7 @@ impl EpoxyClient {
 
 	async fn send_req(
 		&self,
-		req: http::Request<HttpBody>,
+		req: http::Request<StreamingBody>,
 		should_redirect: bool,
 	) -> Result<(hyper::Response<Incoming>, Uri, bool), EpoxyError> {
 		let mut redirected = false;
@@ -599,13 +601,21 @@ impl EpoxyClient {
 		let mut body_content_type: Option<String> = None;
 		let body = match object_truthy(object_get(&options, "body")) {
 			Some(buf) => {
-				let (body, content_type) = convert_body(buf)
+				let (body, content_type) = convert_streaming_body(buf)
 					.await
 					.map_err(|_| EpoxyError::InvalidRequestBody)?;
 				body_content_type = content_type;
-				Bytes::from(body.to_vec())
+				if matches!(body, MaybeStreamingBody::Streaming(_)) && request_redirect {
+					console_warn!("epoxy: streaming request body + redirect unsupported");
+					// collect body instead
+					http_body_util::Either::Right(Full::new(
+						body.into_httpbody()?.collect().await.map_err(EpoxyError::StreamingBodyCollectFailed)?.to_bytes(),
+					))
+				} else {
+					body.into_httpbody()?
+				}
 			}
-			None => Bytes::new(),
+			None => http_body_util::Either::Right(Full::new(Bytes::new())),
 		};
 
 		let headers = object_truthy(object_get(&options, "headers")).and_then(|val| {
@@ -654,12 +664,19 @@ impl EpoxyClient {
 			}
 		}
 
-		if matches!(request_method, Method::POST | Method::PUT | Method::PATCH) && body.is_empty() {
+		let body_empty = if let http_body_util::Either::Right(ref x) = body {
+			x.size_hint().exact().unwrap_or(1) == 0
+		} else {
+			false
+		};
+
+		if matches!(request_method, Method::POST | Method::PUT | Method::PATCH) && body_empty {
 			headers_map.insert(CONTENT_LENGTH, 0.into());
 		}
 
+
 		let (mut response, response_uri, redirected) = self
-			.send_req(request_builder.body(HttpBody::new(body))?, request_redirect)
+			.send_req(request_builder.body(body)?, request_redirect)
 			.await?;
 
 		if self.certs_tampered {
