@@ -294,9 +294,9 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	} else {
 		console.time();
 		let resp = await epoxy_client.fetch(test_url);
-		console.timeEnd();
 		console.log(resp, resp.rawHeaders);
 		log(await resp.text());
+		console.timeEnd();
 	}
 	log("done");
 })();
