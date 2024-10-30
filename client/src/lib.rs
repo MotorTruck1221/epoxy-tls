@@ -17,6 +17,7 @@ use http::{
 	uri::{InvalidUri, InvalidUriParts},
 	HeaderName, HeaderValue, Method, Request, Response,
 };
+use http_body_util::BodyDataStream;
 use hyper::{body::Incoming, Uri};
 use hyper_util_wasm::client::legacy::Client;
 #[cfg(feature = "full")]
@@ -27,8 +28,8 @@ use stream_provider::{StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_body, entries_of_object, from_entries, is_null_body,
-	is_redirect, object_get, object_set, object_truthy, ws_protocol, IncomingBody, UriExt,
-	WasmExecutor, WispTransportRead, WispTransportWrite,
+	is_redirect, object_get, object_set, object_truthy, ws_protocol, UriExt, WasmExecutor,
+	WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -701,7 +702,7 @@ impl EpoxyClient {
 						_ => None,
 					};
 
-					let response_body = IncomingBody::new(response.into_body()).into_async_read();
+					let response_body = BodyDataStream::new(response.into_body()).map_err(std::io::Error::other).into_async_read();
 					let decompressed_body = match compression {
 						Some(alg) => match alg {
 							EpoxyCompression::Gzip => {
@@ -719,7 +720,7 @@ impl EpoxyClient {
 				};
 			} else {
 				let response_stream = if !is_null_body(response.status().as_u16()) {
-					let response_body = IncomingBody::new(response.into_body()).into_async_read();
+					let response_body = BodyDataStream::new(response.into_body()).map_err(std::io::Error::other).into_async_read();
 					Some(asyncread_to_readablestream(Box::pin(response_body), self.buffer_size))
 				} else {
 					None

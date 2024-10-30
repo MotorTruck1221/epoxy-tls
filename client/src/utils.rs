@@ -17,7 +17,7 @@ use futures_rustls::{
 };
 use futures_util::{ready, AsyncRead, AsyncWrite, Future, Stream, StreamExt, TryStreamExt};
 use http::{HeaderValue, Uri};
-use hyper::{body::Body, rt::Executor};
+use hyper::rt::Executor;
 use js_sys::{Array, ArrayBuffer, JsString, Object, Uint8Array};
 use pin_project_lite::pin_project;
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
@@ -87,34 +87,6 @@ where
 		wasm_bindgen_futures::spawn_local(async move {
 			let _ = future.await;
 		});
-	}
-}
-
-pin_project! {
-	pub struct IncomingBody {
-		#[pin]
-		incoming: hyper::body::Incoming,
-	}
-}
-
-impl IncomingBody {
-	pub fn new(incoming: hyper::body::Incoming) -> IncomingBody {
-		IncomingBody { incoming }
-	}
-}
-
-impl Stream for IncomingBody {
-	type Item = std::io::Result<Bytes>;
-	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		self.project().incoming.poll_frame(cx).map(|x| {
-			x.map(|x| {
-				x.map_err(std::io::Error::other).and_then(|x| {
-					x.into_data().map_err(|_| {
-						std::io::Error::other("trailer frame recieved; not implemented")
-					})
-				})
-			})
-		})
 	}
 }
 
