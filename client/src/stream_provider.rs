@@ -2,7 +2,7 @@ use std::{io::ErrorKind, pin::Pin, sync::Arc, task::Poll};
 
 use cfg_if::cfg_if;
 use futures_rustls::{
-	rustls::{crypto::ring::default_provider, ClientConfig, RootCertStore},
+	rustls::{ClientConfig, RootCertStore},
 	TlsConnector,
 };
 use futures_util::{
@@ -31,7 +31,9 @@ pub type ProviderUnencryptedAsyncRW = MuxStreamAsyncRW;
 pub type ProviderTlsAsyncRW = IgnoreCloseNotify;
 pub type ProviderAsyncRW = Either<ProviderTlsAsyncRW, ProviderUnencryptedAsyncRW>;
 pub type ProviderWispTransportGenerator = Box<
-	dyn Fn(bool) -> Pin<
+	dyn Fn(
+			bool,
+		) -> Pin<
 			Box<
 				dyn Future<
 						Output = Result<
@@ -65,11 +67,14 @@ impl StreamProvider {
 		wisp_generator: ProviderWispTransportGenerator,
 		options: &EpoxyClientOptions,
 	) -> Result<Self, EpoxyError> {
+		let provider = Arc::new(futures_rustls::rustls::crypto::ring::default_provider());
+		let client_config = ClientConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()?;
 		let mut client_config = if options.disable_certificate_validation {
-			ClientConfig::builder()
+			client_config
 				.dangerous()
-				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new(
-					default_provider(),
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(
+					provider,
 				)))
 		} else {
 			cfg_if! {
@@ -89,7 +94,7 @@ impl StreamProvider {
 					let certstore = RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned());
 				}
 			}
-			ClientConfig::builder().with_root_certificates(certstore)
+			client_config.with_root_certificates(certstore)
 		}
 		.with_no_client_auth();
 		let no_alpn_client_config = Arc::new(client_config.clone());
@@ -211,7 +216,7 @@ impl StreamProvider {
 				if matches!(err.kind(), ErrorKind::UnexpectedEof) {
 					// maybe actually a wisp error?
 					if let Some(reason) = stream.get_close_reason() {
-						return Err(reason.into());
+						return Err(EpoxyError::WispCloseReason(reason, err));
 					}
 				}
 				Err(err.into())

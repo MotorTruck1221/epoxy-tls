@@ -99,8 +99,8 @@ pub enum EpoxyError {
 	InvalidDnsName(#[from] futures_rustls::rustls::pki_types::InvalidDnsNameError),
 	#[error("Wisp: {0:?} ({0})")]
 	Wisp(#[from] wisp_mux::WispError),
-	#[error("Wisp server closed: {0}")]
-	WispCloseReason(wisp_mux::CloseReason),
+	#[error("Wisp server closed: {0} (IO error: {1:?} ({1}))")]
+	WispCloseReason(CloseReason, std::io::Error),
 	#[error("IO: {0:?} ({0})")]
 	Io(#[from] std::io::Error),
 	#[error("HTTP: {0:?} ({0})")]
@@ -111,6 +111,8 @@ pub enum EpoxyError {
 	Hyper(#[from] hyper::Error),
 	#[error("HTTP ToStr: {0:?} ({0})")]
 	ToStr(#[from] http::header::ToStrError),
+	#[error("Rustls: {0:?} ({0})")]
+	Rustls(#[from] futures_rustls::rustls::Error),
 	#[cfg(feature = "full")]
 	#[error("Pemfile: {0:?} ({0})")]
 	Pemfile(std::io::Error),
@@ -215,12 +217,6 @@ impl From<InvalidHeaderValue> for EpoxyError {
 impl From<InvalidMethod> for EpoxyError {
 	fn from(value: InvalidMethod) -> Self {
 		http::Error::from(value).into()
-	}
-}
-
-impl From<CloseReason> for EpoxyError {
-	fn from(value: CloseReason) -> Self {
-		EpoxyError::WispCloseReason(value)
 	}
 }
 

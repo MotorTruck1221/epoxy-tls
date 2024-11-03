@@ -24,9 +24,9 @@ wasm-bindgen --target web --out-dir out/ ../target/wasm32-unknown-unknown/releas
 echo "[epx] wasm-bindgen finished"
 
 if ! [ "${RELEASE:-0}" = "1" ]; then
-	WASMOPTFLAGS="-g"
+	: "${WASMOPTFLAGS:=-g}"
 else
-	WASMOPTFLAGS=""
+	: "${WASMOPTFLAGS:=}"
 fi
 
 mv out/epoxy_client_bg.wasm out/epoxy_client_unoptimized.wasm
@@ -35,6 +35,7 @@ wasm-opt $WASMOPTFLAGS --signext-lowering out/epoxy_client_unoptimized.wasm -o o
 if [ "${RELEASE:-0}" = "1" ]; then
 	(
 		G="--generate-global-effects"
+		# shellcheck disable=SC2086
 		time wasm-opt $WASMOPTFLAGS \
 			out/epoxy_client_lowered.wasm -o out/epoxy_client_bg.wasm \
 			--converge \

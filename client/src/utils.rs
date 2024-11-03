@@ -1,7 +1,5 @@
 use std::{
-	io::ErrorKind,
-	pin::Pin,
-	task::{Context, Poll},
+	io::ErrorKind, pin::Pin, sync::Arc, task::{Context, Poll}
 };
 
 use async_trait::async_trait;
@@ -306,13 +304,7 @@ impl AsyncWrite for IgnoreCloseNotify {
 }
 
 #[derive(Debug)]
-pub struct NoCertificateVerification(CryptoProvider);
-
-impl NoCertificateVerification {
-	pub fn new(provider: CryptoProvider) -> Self {
-		Self(provider)
-	}
-}
+pub struct NoCertificateVerification(pub Arc<CryptoProvider>);
 
 impl ServerCertVerifier for NoCertificateVerification {
 	fn verify_server_cert(
