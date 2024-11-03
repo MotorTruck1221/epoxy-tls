@@ -153,7 +153,7 @@ async fn handle_stream(
 								muxstream.write(&data[..size]).await?;
 							}
 							data = muxstream.read() => {
-								if let Some(data) = data {
+								if let Some(data) = data? {
 									stream.send(&data).await?;
 								} else {
 									break Ok(());

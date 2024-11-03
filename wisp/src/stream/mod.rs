@@ -3,7 +3,9 @@ mod sink_unfold;
 pub use compat::*;
 
 use crate::{
-	inner::WsEvent, ws::{Frame, LockedWebSocketWrite, Payload}, AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError
+	inner::WsEvent,
+	ws::{Frame, LockedWebSocketWrite, Payload},
+	AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -42,13 +44,13 @@ pub struct MuxStreamRead {
 
 impl MuxStreamRead {
 	/// Read an event from the stream.
-	pub async fn read(&self) -> Option<Bytes> {
-		if self.is_closed.load(Ordering::Acquire) {
-			return None;
+	pub async fn read(&self) -> Result<Option<Bytes>, WispError> {
+		if self.rx.is_empty() && self.is_closed.load(Ordering::Acquire) {
+			return Ok(None);
 		}
 		let bytes = select! {
-			x = self.rx.recv_async() => x.ok()?,
-			_ = self.is_closed_event.listen().fuse() => return None
+			x = self.rx.recv_async() => x.map_err(|_| WispError::MuxMessageFailedToRecv)?,
+			_ = self.is_closed_event.listen().fuse() => return Ok(None)
 		};
 		if self.role == Role::Server && self.should_flow_control {
 			let val = self.flow_control_read.fetch_add(1, Ordering::AcqRel) + 1;
@@ -61,17 +63,18 @@ impl MuxStreamRead {
 						)
 						.into(),
 					)
-					.await
-					.ok()?;
+					.await?;
 				self.flow_control_read.store(0, Ordering::Release);
 			}
 		}
-		Some(bytes)
+		Ok(Some(bytes))
 	}
 
-	pub(crate) fn into_inner_stream(self) -> Pin<Box<dyn Stream<Item = Bytes> + Send>> {
+	pub(crate) fn into_inner_stream(
+		self,
+	) -> Pin<Box<dyn Stream<Item = Result<Bytes, WispError>> + Send>> {
 		Box::pin(stream::unfold(self, |rx| async move {
-			Some((rx.read().await?, rx))
+			Some((rx.read().await.transpose()?, rx))
 		}))
 	}
 
@@ -311,7 +314,7 @@ impl MuxStream {
 	}
 
 	/// Read an event from the stream.
-	pub async fn read(&self) -> Option<Bytes> {
+	pub async fn read(&self) -> Result<Option<Bytes>, WispError> {
 		self.rx.read().await
 	}
 

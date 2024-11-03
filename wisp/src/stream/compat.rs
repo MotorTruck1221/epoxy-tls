@@ -73,7 +73,7 @@ pin_project! {
 	/// Read side of a multiplexor stream that implements futures `Stream`.
 	pub struct MuxStreamIoStream {
 		#[pin]
-		pub(crate) rx: Pin<Box<dyn Stream<Item = Bytes> + Send>>,
+		pub(crate) rx: Pin<Box<dyn Stream<Item = Result<Bytes, WispError>> + Send>>,
 		pub(crate) is_closed: Arc<AtomicBool>,
 		pub(crate) close_reason: Arc<AtomicCloseReason>,
 	}
@@ -98,7 +98,7 @@ impl MuxStreamIoStream {
 impl Stream for MuxStreamIoStream {
 	type Item = Result<Bytes, std::io::Error>;
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		self.project().rx.poll_next(cx).map(|x| x.map(Ok))
+		self.project().rx.poll_next(cx).map_err(std::io::Error::other)
 	}
 }
 

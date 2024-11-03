@@ -177,7 +177,11 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		stream_id: u32,
 		stream_type: StreamType,
 	) -> Result<(MuxMapValue, MuxStream), WispError> {
-		let (ch_tx, ch_rx) = mpsc::bounded(self.buffer_size as usize);
+		let (ch_tx, ch_rx) = mpsc::bounded(if self.role == Role::Server {
+			self.buffer_size as usize
+		} else {
+			usize::MAX
+		});
 
 		let should_flow_control = self.tcp_extensions.contains(&stream_type.into());
 		let flow_control_event: Arc<Event> = Event::new().into();
