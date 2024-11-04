@@ -67,7 +67,7 @@ impl StreamProvider {
 		wisp_generator: ProviderWispTransportGenerator,
 		options: &EpoxyClientOptions,
 	) -> Result<Self, EpoxyError> {
-		let provider = Arc::new(rustls_rustcrypto::provider());
+		let provider = Arc::new(futures_rustls::rustls::crypto::ring::default_provider());
 		let client_config = ClientConfig::builder_with_provider(provider.clone())
 			.with_safe_default_protocol_versions()?;
 		let mut client_config = if options.disable_certificate_validation {
