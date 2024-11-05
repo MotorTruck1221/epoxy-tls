@@ -8,7 +8,7 @@ pub use server::ServerMux;
 
 use crate::{
 	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension, AnyProtocolExtensionBuilder},
-	ws::{Frame, LockedWebSocketWrite},
+	ws::LockedWebSocketWrite,
 	CloseReason, Packet, PacketType, Role, WispError,
 };
 
@@ -22,12 +22,12 @@ enum WispHandshakeResultKind {
 		extensions: Vec<AnyProtocolExtension>,
 	},
 	V1 {
-		frame: Option<Frame<'static>>,
+		frame: Option<Packet<'static>>,
 	},
 }
 
 impl WispHandshakeResultKind {
-	pub fn into_parts(self) -> (Vec<AnyProtocolExtension>, Option<Frame<'static>>) {
+	pub fn into_parts(self) -> (Vec<AnyProtocolExtension>, Option<Packet<'static>>) {
 		match self {
 			Self::V2 { extensions } => (extensions, None),
 			Self::V1 { frame } => (vec![UdpProtocolExtension.into()], frame),

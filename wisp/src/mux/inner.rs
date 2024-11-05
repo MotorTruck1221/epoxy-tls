@@ -46,6 +46,9 @@ struct MuxMapValue {
 pub struct MuxInner<R: WebSocketRead + Send> {
 	// gets taken by the mux task
 	rx: Option<R>,
+	// gets taken by the mux task
+	maybe_downgrade_packet: Option<Packet<'static>>,
+
 	tx: LockedWebSocketWrite,
 	extensions: Vec<AnyProtocolExtension>,
 	tcp_extensions: Vec<u8>,
@@ -82,6 +85,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 
 	pub fn new_server(
 		rx: R,
+		maybe_downgrade_packet: Option<Packet<'static>>,
 		tx: LockedWebSocketWrite,
 		extensions: Vec<AnyProtocolExtension>,
 		buffer_size: u32,
@@ -98,6 +102,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 			MuxInnerResult {
 				mux: Self {
 					rx: Some(rx),
+					maybe_downgrade_packet,
 					tx,
 
 					actor_rx: Some(fut_rx),
@@ -124,6 +129,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 
 	pub fn new_client(
 		rx: R,
+		maybe_downgrade_packet: Option<Packet<'static>>,
 		tx: LockedWebSocketWrite,
 		extensions: Vec<AnyProtocolExtension>,
 		buffer_size: u32,
@@ -136,6 +142,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		MuxInnerResult {
 			mux: Self {
 				rx: Some(rx),
+				maybe_downgrade_packet,
 				tx,
 
 				actor_rx: Some(fut_rx),
@@ -265,8 +272,16 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		let mut next_free_stream_id: u32 = 1;
 
 		let mut rx = self.rx.take().ok_or(WispError::MuxTaskStarted)?;
+		let maybe_downgrade_packet = self.maybe_downgrade_packet.take();
+
 		let tx = self.tx.clone();
 		let fut_rx = self.actor_rx.take().ok_or(WispError::MuxTaskStarted)?;
+
+		if let Some(downgrade_packet) = maybe_downgrade_packet {
+			if self.handle_packet(downgrade_packet, None).await? {
+				return Ok(());
+			}
+		}
 
 		let mut recv_fut = fut_rx.recv_async().fuse();
 		let mut read_fut = rx.wisp_read_split(&tx).fuse();
@@ -342,14 +357,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				}
 				WsEvent::WispMessage(packet, optional_frame) => {
 					if let Some(packet) = packet {
-						let should_break = match self.role {
-							Role::Server => {
-								self.server_handle_packet(packet, optional_frame).await?
-							}
-							Role::Client => {
-								self.client_handle_packet(packet, optional_frame).await?
-							}
-						};
+						let should_break = self.handle_packet(packet, optional_frame).await?;
 						if should_break {
 							break;
 						}
@@ -409,18 +417,31 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		Ok(false)
 	}
 
-	async fn server_handle_packet(
+	async fn handle_packet(
 		&mut self,
 		packet: Packet<'static>,
 		optional_frame: Option<Frame<'static>>,
 	) -> Result<bool, WispError> {
-		use PacketType::*;
+		use PacketType as P;
 		match packet.packet_type {
-			Continue(_) | Info(_) => Err(WispError::InvalidPacketType),
-			Data(data) => self.handle_data_packet(packet.stream_id, optional_frame, data),
-			Close(inner_packet) => self.handle_close_packet(packet.stream_id, inner_packet),
+			P::Data(data) => self.handle_data_packet(packet.stream_id, optional_frame, data),
+			P::Close(inner_packet) => self.handle_close_packet(packet.stream_id, inner_packet),
 
-			Connect(inner_packet) => {
+			_ => match self.role {
+				Role::Server => self.server_handle_packet(packet, optional_frame).await,
+				Role::Client => self.client_handle_packet(packet, optional_frame).await,
+			},
+		}
+	}
+
+	async fn server_handle_packet(
+		&mut self,
+		packet: Packet<'static>,
+		_optional_frame: Option<Frame<'static>>,
+	) -> Result<bool, WispError> {
+		use PacketType as P;
+		match packet.packet_type {
+			P::Connect(inner_packet) => {
 				let (map_value, stream) = self
 					.create_new_stream(packet.stream_id, inner_packet.stream_type)
 					.await?;
@@ -431,21 +452,21 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				self.stream_map.insert(packet.stream_id, map_value);
 				Ok(false)
 			}
+
+			// Continue | Info => invalid packet type
+			// Data | Close => specialcased
+			_ => Err(WispError::InvalidPacketType),
 		}
 	}
 
 	async fn client_handle_packet(
 		&mut self,
 		packet: Packet<'static>,
-		optional_frame: Option<Frame<'static>>,
+		_optional_frame: Option<Frame<'static>>,
 	) -> Result<bool, WispError> {
-		use PacketType::*;
+		use PacketType as P;
 		match packet.packet_type {
-			Connect(_) | Info(_) => Err(WispError::InvalidPacketType),
-			Data(data) => self.handle_data_packet(packet.stream_id, optional_frame, data),
-			Close(inner_packet) => self.handle_close_packet(packet.stream_id, inner_packet),
-
-			Continue(inner_packet) => {
+			P::Continue(inner_packet) => {
 				if let Some(stream) = self.stream_map.get(&packet.stream_id) {
 					if stream.stream_type == StreamType::Tcp {
 						stream
@@ -456,6 +477,10 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				}
 				Ok(false)
 			}
+
+			// Connect | Info => invalid packet type
+			// Data | Close => specialcased
+			_ => Err(WispError::InvalidPacketType),
 		}
 	}
 }

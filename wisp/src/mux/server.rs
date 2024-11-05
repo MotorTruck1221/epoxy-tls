@@ -11,7 +11,7 @@ use futures::channel::oneshot;
 
 use crate::{
 	extensions::AnyProtocolExtension,
-	ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
+	ws::{LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	CloseReason, ConnectPacket, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role,
 	WispError,
 };
@@ -109,7 +109,8 @@ impl ServerMux {
 			let (extensions, extra_packet) = handshake_result.kind.into_parts();
 
 			let (mux_result, muxstream_recv) = MuxInner::new_server(
-				AppendingWebSocketRead(extra_packet, rx),
+				rx,
+				extra_packet,
 				tx.clone(),
 				extensions.clone(),
 				buffer_size,

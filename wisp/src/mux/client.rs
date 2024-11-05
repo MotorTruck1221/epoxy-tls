@@ -12,7 +12,7 @@ use futures::channel::oneshot;
 use crate::{
 	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension},
 	mux::send_info_packet,
-	ws::{AppendingWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
+	ws::{LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	CloseReason, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role, StreamType,
 	WispError,
 };
@@ -110,10 +110,11 @@ impl ClientMux {
 		let tx = LockedWebSocketWrite::new(Box::new(tx));
 
 		let (handshake_result, buffer_size) = handshake(&mut rx, &tx, wisp_v2).await?;
-		let (extensions, frame) = handshake_result.kind.into_parts();
+		let (extensions, extra_packet) = handshake_result.kind.into_parts();
 
 		let mux_inner = MuxInner::new_client(
-			AppendingWebSocketRead(frame, rx),
+			rx,
+			extra_packet,
 			tx.clone(),
 			extensions.clone(),
 			buffer_size,

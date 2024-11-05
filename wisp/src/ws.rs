@@ -261,33 +261,3 @@ impl LockedWebSocketWrite {
 		self.0.lock().await.wisp_close().await
 	}
 }
-
-pub(crate) struct AppendingWebSocketRead<R>(pub Option<Frame<'static>>, pub R)
-where
-	R: WebSocketRead + Send;
-
-#[async_trait]
-impl<R> WebSocketRead for AppendingWebSocketRead<R>
-where
-	R: WebSocketRead + Send,
-{
-	async fn wisp_read_frame(
-		&mut self,
-		tx: &LockedWebSocketWrite,
-	) -> Result<Frame<'static>, WispError> {
-		if let Some(x) = self.0.take() {
-			return Ok(x);
-		}
-		self.1.wisp_read_frame(tx).await
-	}
-
-	async fn wisp_read_split(
-		&mut self,
-		tx: &LockedWebSocketWrite,
-	) -> Result<(Frame<'static>, Option<Frame<'static>>), WispError> {
-		if let Some(x) = self.0.take() {
-			return Ok((x, None));
-		}
-		self.1.wisp_read_split(tx).await
-	}
-}
