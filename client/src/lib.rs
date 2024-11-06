@@ -25,12 +25,12 @@ use hyper_util_wasm::client::legacy::Client;
 use io_stream::{iostream_from_asyncrw, iostream_from_stream};
 use js_sys::{Array, Function, Object, Promise};
 use send_wrapper::SendWrapper;
-use stream_provider::{StreamProvider, StreamProviderService};
+use stream_provider::{ProviderWispTransportGenerator, StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_streaming_body, entries_of_object, from_entries,
-	is_null_body, is_redirect, object_get, object_set, object_truthy, ws_protocol, StreamingBody,
-	UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
+	is_null_body, is_redirect, object_get, object_set, object_truthy, websocket_transport,
+	StreamingBody, UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -43,7 +43,6 @@ use wisp_mux::{
 	ws::{WebSocketRead, WebSocketWrite},
 	CloseReason,
 };
-use ws_wrapper::WebSocketWrapper;
 
 #[cfg(feature = "full")]
 mod io_stream;
@@ -52,7 +51,6 @@ mod tokioio;
 mod utils;
 #[cfg(feature = "full")]
 mod websocket;
-mod ws_wrapper;
 
 #[wasm_bindgen(typescript_custom_section)]
 const EPOXYCLIENT_TYPES: &'static str = r#"
@@ -60,7 +58,7 @@ type EpoxyIoStream = {
 	read: ReadableStream<Uint8Array>,
 	write: WritableStream<Uint8Array>,
 };
-type EpoxyWispTransport = string | (() => { read: ReadableStream<ArrayBuffer>, write: WritableStream<Uint8Array> });
+type EpoxyWispTransport = string | ((wisp_v2: boolean) => { read: ReadableStream<ArrayBuffer>, write: WritableStream<Uint8Array> });
 type EpoxyWebSocketInput = string | ArrayBuffer;
 type EpoxyWebSocketHeadersInput = Headers | { [key: string]: string };
 type EpoxyUrlInput = string | URL;
@@ -120,10 +118,7 @@ pub enum EpoxyError {
 	#[error("Webpki: {0:?} ({0})")]
 	Webpki(#[from] webpki::Error),
 
-	#[error("Wisp WebSocket failed to connect: {0}")]
-	WebSocketConnectFailed(String),
-
-	#[error("Custom Wisp transport: {0}")]
+	#[error("Wisp transport: {0}")]
 	WispTransport(String),
 	#[error("Invalid Wisp transport: {0}")]
 	InvalidWispTransport(String),
@@ -324,6 +319,43 @@ impl EpoxyHandlers {
 	}
 }
 
+fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
+	let wisp_transport = SendWrapper::new(function);
+	Box::new(move |wisp_v2| {
+		let wisp_transport = wisp_transport.clone();
+		Box::pin(SendWrapper::new(async move {
+			let transport = wisp_transport
+				.call1(&JsValue::NULL, &wisp_v2.into())
+				.map_err(EpoxyError::wisp_transport)?;
+
+			let transport = match transport.dyn_into::<Promise>() {
+				Ok(transport) => {
+					let fut = JsFuture::from(transport);
+					fut.await.map_err(EpoxyError::wisp_transport)?
+				}
+				Err(transport) => transport,
+			}
+			.into();
+
+			let read = WispTransportRead {
+				inner: SendWrapper::new(
+					wasm_streams::ReadableStream::from_raw(object_get(&transport, "read").into())
+						.into_stream(),
+				),
+			};
+			let write: WritableStream = object_get(&transport, "write").into();
+			let write = WispTransportWrite {
+				inner: SendWrapper::new(write.get_writer().map_err(EpoxyError::wisp_transport)?),
+			};
+
+			Ok((
+				Box::new(read) as Box<dyn WebSocketRead + Send>,
+				Box::new(write) as Box<dyn WebSocketWrite + Send>,
+			))
+		}))
+	})
+}
+
 #[wasm_bindgen(inspectable)]
 pub struct EpoxyClient {
 	stream_provider: Arc<StreamProvider>,
@@ -349,80 +381,14 @@ impl EpoxyClient {
 		options: EpoxyClientOptions,
 	) -> Result<EpoxyClient, EpoxyError> {
 		let stream_provider = if let Some(wisp_url) = transport.as_string() {
-			let wisp_uri: Uri = wisp_url.clone().try_into()?;
-			if wisp_uri.scheme_str() != Some("wss") && wisp_uri.scheme_str() != Some("ws") {
-				return Err(EpoxyError::InvalidUrlScheme(
-					wisp_uri.scheme_str().map(ToString::to_string),
-				));
-			}
-
 			let ws_protocols = options.websocket_protocols.clone();
 			Arc::new(StreamProvider::new(
-				Box::new(move |wisp_v2| {
-					let wisp_url = wisp_url.clone();
-					let mut ws_protocols = ws_protocols.clone();
-					if wisp_v2 {
-						// send some random data to ask the server for v2
-						ws_protocols.push(ws_protocol());
-					}
-
-					Box::pin(async move {
-						let (write, read) = WebSocketWrapper::connect(&wisp_url, &ws_protocols)?;
-						while write.inner.ready_state() == 0 {
-							if !write.wait_for_open().await {
-								return Err(EpoxyError::WebSocketConnectFailed(
-									"websocket did not open".to_string(),
-								));
-							}
-						}
-						Ok((
-							Box::new(read) as Box<dyn WebSocketRead + Send>,
-							Box::new(write) as Box<dyn WebSocketWrite + Send>,
-						))
-					})
-				}),
+				create_wisp_transport(websocket_transport(wisp_url, ws_protocols)),
 				&options,
 			)?)
 		} else if let Some(wisp_transport) = transport.dyn_ref::<Function>() {
-			let wisp_transport = SendWrapper::new(wisp_transport.clone());
 			Arc::new(StreamProvider::new(
-				Box::new(move |_| {
-					let wisp_transport = wisp_transport.clone();
-					Box::pin(SendWrapper::new(async move {
-						let transport = wisp_transport
-							.call0(&JsValue::NULL)
-							.map_err(EpoxyError::wisp_transport)?;
-
-						let transport = match transport.dyn_into::<Promise>() {
-							Ok(transport) => {
-								let fut = JsFuture::from(transport);
-								fut.await.map_err(EpoxyError::wisp_transport)?
-							}
-							Err(transport) => transport,
-						}
-						.into();
-
-						let read = WispTransportRead {
-							inner: SendWrapper::new(
-								wasm_streams::ReadableStream::from_raw(
-									object_get(&transport, "read").into(),
-								)
-								.into_stream(),
-							),
-						};
-						let write: WritableStream = object_get(&transport, "write").into();
-						let write = WispTransportWrite {
-							inner: SendWrapper::new(
-								write.get_writer().map_err(EpoxyError::wisp_transport)?,
-							),
-						};
-
-						Ok((
-							Box::new(read) as Box<dyn WebSocketRead + Send>,
-							Box::new(write) as Box<dyn WebSocketWrite + Send>,
-						))
-					}))
-				}),
+				create_wisp_transport(wisp_transport.clone()),
 				&options,
 			)?)
 		} else {
