@@ -228,7 +228,7 @@ async fn request(
 
 	spawn_local(async move {
 		if let Err(err) = conn.with_upgrades().await {
-			console_error!("websocket connection future failed: {:?}", err);
+			console_error!("epoxy: websocket connection task failed: {:?}", err);
 		}
 	});
 

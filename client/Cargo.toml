@@ -33,7 +33,7 @@ wasm-bindgen-futures = "0.4.43"
 wasm-streams = "0.4.0"
 web-sys = { version = "0.3.70", features = ["BinaryType", "Headers", "MessageEvent", "Request", "RequestInit", "Response", "ResponseInit", "Url", "WebSocket"] }
 webpki-roots = "0.26.3"
-wisp-mux = { version = "*", path = "../wisp", features = ["wasm"], default-features = false }
+wisp-mux = { version = "*", path = "../wisp", features = ["wasm", "generic_stream"], default-features = false }
 
 [dependencies.getrandom]
 version = "*"

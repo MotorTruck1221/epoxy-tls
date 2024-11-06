@@ -3,11 +3,11 @@ use std::{error::Error, str::FromStr, sync::Arc};
 
 #[cfg(feature = "full")]
 use async_compression::futures::bufread as async_comp;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use cfg_if::cfg_if;
 #[cfg(feature = "full")]
 use futures_util::future::Either;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use http::{
 	header::{
 		InvalidHeaderName, InvalidHeaderValue, ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH,
@@ -23,14 +23,14 @@ use hyper::{body::Incoming, Uri};
 use hyper_util_wasm::client::legacy::Client;
 #[cfg(feature = "full")]
 use io_stream::{iostream_from_asyncrw, iostream_from_stream};
-use js_sys::{Array, Function, Object, Promise};
+use js_sys::{Array, ArrayBuffer, Function, Object, Promise, Uint8Array};
 use send_wrapper::SendWrapper;
 use stream_provider::{ProviderWispTransportGenerator, StreamProvider, StreamProviderService};
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_streaming_body, entries_of_object, from_entries,
 	is_null_body, is_redirect, object_get, object_set, object_truthy, websocket_transport,
-	StreamingBody, UriExt, WasmExecutor, WispTransportRead, WispTransportWrite,
+	StreamingBody, UriExt, WasmExecutor, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -40,6 +40,7 @@ use websocket::EpoxyWebSocket;
 #[cfg(feature = "full")]
 use wisp_mux::StreamType;
 use wisp_mux::{
+	generic::GenericWebSocketRead,
 	ws::{WebSocketRead, WebSocketWrite},
 	CloseReason,
 };
@@ -337,12 +338,17 @@ fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
 			}
 			.into();
 
-			let read = WispTransportRead {
-				inner: SendWrapper::new(
-					wasm_streams::ReadableStream::from_raw(object_get(&transport, "read").into())
-						.into_stream(),
-				),
-			};
+			let read = GenericWebSocketRead::new(SendWrapper::new(
+				wasm_streams::ReadableStream::from_raw(object_get(&transport, "read").into())
+					.into_stream()
+					.map(|x| {
+						let pkt = x.map_err(EpoxyError::wisp_transport)?;
+						let arr: ArrayBuffer = pkt.dyn_into().map_err(|x| {
+							EpoxyError::InvalidWispTransportPacket(format!("{:?}", x))
+						})?;
+						Ok::<BytesMut, EpoxyError>(BytesMut::from(Uint8Array::new(&arr).to_vec().as_slice()))
+					}),
+			));
 			let write: WritableStream = object_get(&transport, "write").into();
 			let write = WispTransportWrite {
 				inner: SendWrapper::new(write.get_writer().map_err(EpoxyError::wisp_transport)?),

@@ -21,9 +21,7 @@ use wisp_mux::{
 };
 
 use crate::{
-	console_log,
-	utils::{IgnoreCloseNotify, NoCertificateVerification},
-	EpoxyClientOptions, EpoxyError,
+	console_error, console_log, utils::{IgnoreCloseNotify, NoCertificateVerification}, EpoxyClientOptions, EpoxyError
 };
 
 pub type ProviderUnencryptedStream = MuxStreamIo;
@@ -140,7 +138,10 @@ impl StreamProvider {
 		locked.replace(mux);
 		let current_client = self.current_client.clone();
 		spawn_local(async move {
-			console_log!("multiplexor future result: {:?}", fut.await);
+			match fut.await {
+				Ok(_) => console_log!("epoxy: wisp multiplexor task ended successfully"),
+				Err(x) => console_error!("epoxy: wisp multiplexor task ended with an error: {} {:?}", x, x),
+			}
 			current_client.lock().await.take();
 		});
 		Ok(())
