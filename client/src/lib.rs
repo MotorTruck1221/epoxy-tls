@@ -29,8 +29,8 @@ use stream_provider::{ProviderWispTransportGenerator, StreamProvider, StreamProv
 use thiserror::Error;
 use utils::{
 	asyncread_to_readablestream, convert_streaming_body, entries_of_object, from_entries,
-	is_null_body, is_redirect, object_get, object_set, object_truthy, websocket_transport,
-	StreamingBody, UriExt, WasmExecutor, WispTransportWrite,
+	is_null_body, is_redirect, object_get, object_set, object_truthy, ws_protocol, StreamingBody,
+	UriExt, WasmExecutor, WispTransportWrite,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -44,6 +44,7 @@ use wisp_mux::{
 	ws::{WebSocketRead, WebSocketWrite},
 	CloseReason,
 };
+use ws_wrapper::WebSocketWrapper;
 
 #[cfg(feature = "full")]
 mod io_stream;
@@ -52,6 +53,7 @@ mod tokioio;
 mod utils;
 #[cfg(feature = "full")]
 mod websocket;
+mod ws_wrapper;
 
 #[wasm_bindgen(typescript_custom_section)]
 const EPOXYCLIENT_TYPES: &'static str = r#"
@@ -59,7 +61,7 @@ type EpoxyIoStream = {
 	read: ReadableStream<Uint8Array>,
 	write: WritableStream<Uint8Array>,
 };
-type EpoxyWispTransport = string | ((wisp_v2: boolean) => { read: ReadableStream<ArrayBuffer>, write: WritableStream<Uint8Array> });
+type EpoxyWispTransport = string | (() => { read: ReadableStream<ArrayBuffer>, write: WritableStream<Uint8Array> });
 type EpoxyWebSocketInput = string | ArrayBuffer;
 type EpoxyWebSocketHeadersInput = Headers | { [key: string]: string };
 type EpoxyUrlInput = string | URL;
@@ -119,7 +121,10 @@ pub enum EpoxyError {
 	#[error("Webpki: {0:?} ({0})")]
 	Webpki(#[from] webpki::Error),
 
-	#[error("Wisp transport: {0}")]
+	#[error("Wisp WebSocket failed to connect: {0}")]
+	WebSocketConnectFailed(String),
+
+	#[error("Custom Wisp transport: {0}")]
 	WispTransport(String),
 	#[error("Invalid Wisp transport: {0}")]
 	InvalidWispTransport(String),
@@ -346,7 +351,9 @@ fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
 						let arr: ArrayBuffer = pkt.dyn_into().map_err(|x| {
 							EpoxyError::InvalidWispTransportPacket(format!("{:?}", x))
 						})?;
-						Ok::<BytesMut, EpoxyError>(BytesMut::from(Uint8Array::new(&arr).to_vec().as_slice()))
+						Ok::<BytesMut, EpoxyError>(BytesMut::from(
+							Uint8Array::new(&arr).to_vec().as_slice(),
+						))
 					}),
 			));
 			let write: WritableStream = object_get(&transport, "write").into();
@@ -387,9 +394,38 @@ impl EpoxyClient {
 		options: EpoxyClientOptions,
 	) -> Result<EpoxyClient, EpoxyError> {
 		let stream_provider = if let Some(wisp_url) = transport.as_string() {
+			let wisp_uri: Uri = wisp_url.clone().try_into()?;
+			if wisp_uri.scheme_str() != Some("wss") && wisp_uri.scheme_str() != Some("ws") {
+				return Err(EpoxyError::InvalidUrlScheme(
+					wisp_uri.scheme_str().map(ToString::to_string),
+				));
+			}
+
 			let ws_protocols = options.websocket_protocols.clone();
 			Arc::new(StreamProvider::new(
-				create_wisp_transport(websocket_transport(wisp_url, ws_protocols)),
+				Box::new(move |wisp_v2| {
+					let wisp_url = wisp_url.clone();
+					let mut ws_protocols = ws_protocols.clone();
+					if wisp_v2 {
+						// send some random data to ask the server for v2
+						ws_protocols.push(ws_protocol());
+					}
+
+					Box::pin(async move {
+						let (write, read) = WebSocketWrapper::connect(&wisp_url, &ws_protocols)?;
+						while write.inner.ready_state() == 0 {
+							if !write.wait_for_open().await {
+								return Err(EpoxyError::WebSocketConnectFailed(
+									"websocket did not open".to_string(),
+								));
+							}
+						}
+						Ok((
+							Box::new(read) as Box<dyn WebSocketRead + Send>,
+							Box::new(write) as Box<dyn WebSocketWrite + Send>,
+						))
+					})
+				}),
 				&options,
 			)?)
 		} else if let Some(wisp_transport) = transport.dyn_ref::<Function>() {

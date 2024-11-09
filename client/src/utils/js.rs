@@ -3,7 +3,7 @@ use std::{pin::Pin, task::{Context, Poll}};
 use bytes::Bytes;
 use futures_util::{AsyncRead, Stream, StreamExt, TryStreamExt};
 use http_body_util::{Either, Full, StreamBody};
-use js_sys::{Array, Function, JsString, Object, Uint8Array};
+use js_sys::{Array, JsString, Object, Uint8Array};
 use send_wrapper::SendWrapper;
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use wasm_streams::ReadableStream;
@@ -14,71 +14,11 @@ use super::ReaderStream;
 
 
 #[wasm_bindgen(inline_js = r#"
-class WebSocketStreamPonyfill {
-	url;
-	opened;
-	closed;
-	close;
-	constructor(url, options = {}) {
-		if (options.signal?.aborted) {
-			throw new DOMException('This operation was aborted', 'AbortError');
-		}
-		this.url = url;
-		const ws = new WebSocket(url, options.protocols ?? []);
-		ws.binaryType = "arraybuffer";
-		const closeWithInfo = ({ closeCode: code, reason } = {}) => ws.close(code, reason);
-		this.opened = new Promise((resolve, reject) => {
-            const errorHandler = ()=>reject(new Error("WebSocket closed before handshake complete."));
-			ws.onopen = () => {
-				resolve({
-					readable: new ReadableStream({
-						start(controller) {
-							ws.onmessage = ({ data }) => controller.enqueue(data);
-							ws.onerror = e => controller.error(e);
-						},
-						cancel: closeWithInfo,
-					}),
-					writable: new WritableStream({
-						write(chunk) { ws.send(chunk); },
-						abort() { ws.close(); },
-						close: closeWithInfo,
-					}),
-					protocol: ws.protocol,
-					extensions: ws.extensions,
-				});
-				ws.removeEventListener('error', errorHandler);
-			};
-			ws.addEventListener('error', errorHandler);
-		});
-		this.closed = new Promise((resolve, reject) => {
-			ws.onclose = ({ code, reason }) => {
-				resolve({ closeCode: code, reason });
-				ws.removeEventListener('error', reject);
-			};
-			ws.addEventListener('error', reject);
-		});
-		if (options.signal) {
-			options.signal.onabort = () => ws.close();
-		}
-		this.close = closeWithInfo;
-	}
-}
-
-function ws_protocol() {
+export function ws_protocol() {
 	return (
       [1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,
       c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
     );
-}
-
-export function websocket_transport(url, protocols) {
-	const ws_impl = typeof WebSocketStream === "undefined" ? WebSocketStreamPonyfill : WebSocketStream;
-	return async (wisp_v2)=>{
-		if (wisp_v2) protocols.push(ws_protocol());
-		const ws = new ws_impl(url, { protocols });
-		const { readable, writable } = await ws.opened; 
-		return { read: readable, write: writable };
-	}
 }
 
 export function object_get(obj, k) { 
@@ -131,8 +71,6 @@ export function from_entries(entries){
 }
 "#)]
 extern "C" {
-	pub fn websocket_transport(url: String, protocols: Vec<String>) -> Function;
-
 	pub fn object_get(obj: &Object, key: &str) -> JsValue;
 	pub fn object_set(obj: &Object, key: &str, val: JsValue);
 
@@ -144,6 +82,7 @@ extern "C" {
 	fn entries_of_object_inner(obj: &Object) -> Vec<Array>;
 	pub fn define_property(obj: &Object, key: &str, val: JsValue);
 	pub fn ws_key() -> String;
+	pub fn ws_protocol() -> String;
 
 	#[wasm_bindgen(catch)]
 	pub fn from_entries(iterable: &JsValue) -> Result<Object, JsValue>;

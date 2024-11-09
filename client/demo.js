@@ -332,12 +332,12 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			console.time();
 			let resp = await epoxy_client.fetch(test_url);
 			console.log(resp, resp.rawHeaders);
-			log(await resp.text());
+			log(await resp.arrayBuffer());
 			console.timeEnd();
 		}
 		log("done");
 	} catch (err) {
 		console.error(err);
-		log(err);
+		log(err.stack);
 	}
 })();
