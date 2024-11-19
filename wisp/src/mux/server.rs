@@ -44,10 +44,16 @@ async fn handshake<R: WebSocketRead>(
 			Packet::maybe_parse_info(rx.wisp_read_frame(tx).await?, Role::Server, &mut builders)?;
 
 		if let PacketType::Info(info) = packet.packet_type {
+			let mut supported_extensions = get_supported_extensions(info.extensions, &mut builders);
+
+			for extension in supported_extensions.iter_mut() {
+				extension.handle_handshake(rx, tx).await?;
+			}
+
 			// v2 client
 			Ok(WispHandshakeResult {
 				kind: WispHandshakeResultKind::V2 {
-					extensions: get_supported_extensions(info.extensions, &mut builders),
+					extensions: supported_extensions,
 				},
 				downgraded: false,
 			})
@@ -55,7 +61,7 @@ async fn handshake<R: WebSocketRead>(
 			// downgrade to v1
 			Ok(WispHandshakeResult {
 				kind: WispHandshakeResultKind::V1 {
-					frame: Some(packet.into()),
+					frame: Some(packet),
 				},
 				downgraded: true,
 			})

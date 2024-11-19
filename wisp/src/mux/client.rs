@@ -44,10 +44,16 @@ async fn handshake<R: WebSocketRead>(
 			(closure)(&mut builders).await?;
 			send_info_packet(tx, &mut builders).await?;
 
+			let mut supported_extensions = get_supported_extensions(info.extensions, &mut builders);
+
+			for extension in supported_extensions.iter_mut() {
+				extension.handle_handshake(rx, tx).await?;
+			}
+
 			Ok((
 				WispHandshakeResult {
 					kind: WispHandshakeResultKind::V2 {
-						extensions: get_supported_extensions(info.extensions, &mut builders),
+						extensions: supported_extensions,
 					},
 					downgraded: false,
 				},
