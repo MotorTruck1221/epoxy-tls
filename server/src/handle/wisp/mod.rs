@@ -33,12 +33,10 @@ use crate::{
 async fn copy_read_fast(
 	muxrx: MuxStreamAsyncRead,
 	mut tcptx: OwnedWriteHalf,
+	#[cfg(feature = "speed-limit")] limiter: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
 ) -> std::io::Result<()> {
-	#[cfg(feature = "speed-limit")]
-	let limiter = async_speed_limit::Limiter::builder(CONFIG.stream.write_limit)
-		.refill(Duration::from_secs(1))
-		.clock(async_speed_limit::clock::StandardClock)
-		.build();
 	let mut muxrx = muxrx.compat();
 	loop {
 		let buf = muxrx.fill_buf().await?;
@@ -59,12 +57,13 @@ async fn copy_read_fast(
 	}
 }
 
-async fn copy_write_fast(muxtx: MuxStreamWrite, tcprx: OwnedReadHalf) -> anyhow::Result<()> {
-	#[cfg(feature = "speed-limit")]
-	let limiter = async_speed_limit::Limiter::builder(CONFIG.stream.read_limit)
-		.refill(Duration::from_secs(1))
-		.clock(async_speed_limit::clock::StandardClock)
-		.build();
+async fn copy_write_fast(
+	muxtx: MuxStreamWrite,
+	tcprx: OwnedReadHalf,
+	#[cfg(feature = "speed-limit")] limiter: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
+) -> anyhow::Result<()> {
 	let mut tcprx = BufReader::with_capacity(CONFIG.stream.buffer_size, tcprx);
 	loop {
 		let buf = tcprx.fill_buf().await?;
@@ -88,6 +87,12 @@ async fn handle_stream(
 	id: String,
 	event: Arc<Event>,
 	#[cfg(feature = "twisp")] twisp_map: twisp::TwispMap,
+	#[cfg(feature = "speed-limit")] read_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
+	#[cfg(feature = "speed-limit")] write_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
 ) {
 	let requested_stream = connect.clone();
 
@@ -141,8 +146,8 @@ async fn handle_stream(
 					let muxread = muxread.into_stream().into_asyncread();
 					let (tcpread, tcpwrite) = stream.into_split();
 					select! {
-						x = copy_read_fast(muxread, tcpwrite) => x?,
-						x = copy_write_fast(muxwrite, tcpread) => x?,
+						x = copy_read_fast(muxread, tcpwrite, #[cfg(feature = "speed-limit")] write_limit) => x?,
+						x = copy_write_fast(muxwrite, tcpread, #[cfg(feature = "speed-limit")] read_limit) => x?,
 					}
 					Ok(())
 				}
@@ -248,6 +253,17 @@ pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow:
 		}
 	}
 
+	#[cfg(feature = "speed-limit")]
+	let read_limiter = async_speed_limit::Limiter::builder(CONFIG.wisp.read_limit)
+		.refill(Duration::from_secs(1))
+		.clock(async_speed_limit::clock::StandardClock)
+		.build();
+	#[cfg(feature = "speed-limit")]
+	let write_limiter = async_speed_limit::Limiter::builder(CONFIG.wisp.write_limit)
+		.refill(Duration::from_secs(1))
+		.clock(async_speed_limit::clock::StandardClock)
+		.build();
+
 	let (mux, fut) = ServerMux::create(
 		read,
 		write,
@@ -304,6 +320,10 @@ pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow:
 			event.clone(),
 			#[cfg(feature = "twisp")]
 			twisp_map.clone(),
+			#[cfg(feature = "speed-limit")]
+			read_limiter.clone(),
+			#[cfg(feature = "speed-limit")]
+			write_limiter.clone(),
 		));
 	}
 

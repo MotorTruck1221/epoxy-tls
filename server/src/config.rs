@@ -159,6 +159,13 @@ pub struct WispConfig {
 	/// Wisp version 2 authentication extension advertised.
 	pub auth_extension: Option<ProtocolExtensionAuth>,
 
+	#[cfg(feature = "speed-limit")]
+	/// Read limit in bytes/second for all streams.
+	pub read_limit: f64,
+	#[cfg(feature = "speed-limit")]
+	/// Write limit in bytes/second for all streams.
+	pub write_limit: f64,
+
 	#[serde(skip_serializing_if = "HashMap::is_empty")]
 	/// Wisp version 2 password authentication extension username/passwords.
 	pub password_extension_users: HashMap<String, String>,
@@ -180,13 +187,6 @@ pub struct StreamConfig {
 	pub tcp_nodelay: bool,
 	/// Buffer size of reads from TCP sockets.
 	pub buffer_size: usize,
-
-	#[cfg(feature = "speed-limit")]
-	/// Remote stream read limit in bytes/second.
-	pub read_limit: f64,
-	#[cfg(feature = "speed-limit")]
-	/// Remote stream write limit in bytes/second.
-	pub write_limit: f64,
 
 	/// Whether or not to allow Wisp clients to create UDP streams.
 	pub allow_udp: bool,
@@ -338,6 +338,11 @@ impl Default for WispConfig {
 			allow_wsproxy: true,
 			prefix: String::new(),
 
+			#[cfg(feature = "speed-limit")]
+			read_limit: f64::INFINITY,
+			#[cfg(feature = "speed-limit")]
+			write_limit: f64::INFINITY,
+
 			wisp_v2: true,
 			extensions: vec![ProtocolExtension::Udp, ProtocolExtension::Motd],
 			auth_extension: None,
@@ -413,11 +418,6 @@ impl Default for StreamConfig {
 		Self {
 			tcp_nodelay: false,
 			buffer_size: 16384,
-
-			#[cfg(feature = "speed-limit")]
-			read_limit: f64::INFINITY,
-			#[cfg(feature = "speed-limit")]
-			write_limit: f64::INFINITY,
 
 			allow_udp: true,
 			allow_wsproxy_udp: false,
