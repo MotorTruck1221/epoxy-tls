@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
-	ws::{LockedWebSocketWrite, WebSocketRead},
+	ws::{DynWebSocketRead, LockingWebSocketWrite},
 	Role, WispError,
 };
 
@@ -94,17 +94,17 @@ impl ProtocolExtension for PasswordProtocolExtension {
 
 	async fn handle_handshake(
 		&mut self,
-		_read: &mut dyn WebSocketRead,
-		_write: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
 
 	async fn handle_packet(
 		&mut self,
-		_packet: Bytes,
-		_read: &mut dyn WebSocketRead,
-		_write: &LockedWebSocketWrite,
+		_: Bytes,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Err(WispError::ExtensionImplNotSupported)
 	}

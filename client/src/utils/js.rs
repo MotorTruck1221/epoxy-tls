@@ -1,4 +1,7 @@
-use std::{pin::Pin, task::{Context, Poll}};
+use std::{
+	pin::Pin,
+	task::{Context, Poll},
+};
 
 use bytes::Bytes;
 use futures_util::{AsyncRead, Stream, StreamExt, TryStreamExt};
@@ -11,7 +14,6 @@ use wasm_streams::ReadableStream;
 use crate::{console_error, EpoxyError};
 
 use super::ReaderStream;
-
 
 #[wasm_bindgen(inline_js = r#"
 export function ws_protocol() {

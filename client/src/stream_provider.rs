@@ -1,5 +1,6 @@
 use std::{io::ErrorKind, pin::Pin, sync::Arc, task::Poll};
 
+use bytes::BytesMut;
 use cfg_if::cfg_if;
 use futures_rustls::{
 	rustls::{ClientConfig, RootCertStore},
@@ -8,7 +9,7 @@ use futures_rustls::{
 use futures_util::{
 	future::Either,
 	lock::{Mutex, MutexGuard},
-	AsyncRead, AsyncWrite, Future,
+	AsyncRead, AsyncWrite, Future, Stream,
 };
 use hyper_util_wasm::client::legacy::connect::{ConnectSvc, Connected, Connection};
 use pin_project_lite::pin_project;
@@ -16,18 +17,30 @@ use wasm_bindgen_futures::spawn_local;
 use webpki_roots::TLS_SERVER_ROOTS;
 use wisp_mux::{
 	extensions::{udp::UdpProtocolExtensionBuilder, AnyProtocolExtensionBuilder},
-	ws::{WebSocketRead, WebSocketWrite},
+	generic::GenericWebSocketRead,
+	ws::{EitherWebSocketRead, EitherWebSocketWrite},
 	ClientMux, MuxStreamAsyncRW, MuxStreamIo, StreamType, WispV2Handshake,
 };
 
 use crate::{
-	console_error, console_log, utils::{IgnoreCloseNotify, NoCertificateVerification}, EpoxyClientOptions, EpoxyError
+	console_error, console_log,
+	utils::{IgnoreCloseNotify, NoCertificateVerification, WispTransportWrite},
+	ws_wrapper::{WebSocketReader, WebSocketWrapper},
+	EpoxyClientOptions, EpoxyError,
 };
 
 pub type ProviderUnencryptedStream = MuxStreamIo;
 pub type ProviderUnencryptedAsyncRW = MuxStreamAsyncRW;
 pub type ProviderTlsAsyncRW = IgnoreCloseNotify;
 pub type ProviderAsyncRW = Either<ProviderTlsAsyncRW, ProviderUnencryptedAsyncRW>;
+pub type ProviderWispTransportRead = EitherWebSocketRead<
+	WebSocketReader,
+	GenericWebSocketRead<
+		Pin<Box<dyn Stream<Item = Result<BytesMut, EpoxyError>> + Send>>,
+		EpoxyError,
+	>,
+>;
+pub type ProviderWispTransportWrite = EitherWebSocketWrite<WebSocketWrapper, WispTransportWrite>;
 pub type ProviderWispTransportGenerator = Box<
 	dyn Fn(
 			bool,
@@ -35,10 +48,7 @@ pub type ProviderWispTransportGenerator = Box<
 			Box<
 				dyn Future<
 						Output = Result<
-							(
-								Box<dyn WebSocketRead + Send>,
-								Box<dyn WebSocketWrite + Send>,
-							),
+							(ProviderWispTransportRead, ProviderWispTransportWrite),
 							EpoxyError,
 						>,
 					> + Sync
@@ -54,7 +64,7 @@ pub struct StreamProvider {
 	wisp_v2: bool,
 	udp_extension: bool,
 
-	current_client: Arc<Mutex<Option<ClientMux>>>,
+	current_client: Arc<Mutex<Option<ClientMux<ProviderWispTransportWrite>>>>,
 
 	h2_config: Arc<ClientConfig>,
 	client_config: Arc<ClientConfig>,
@@ -115,7 +125,7 @@ impl StreamProvider {
 
 	async fn create_client(
 		&self,
-		mut locked: MutexGuard<'_, Option<ClientMux>>,
+		mut locked: MutexGuard<'_, Option<ClientMux<ProviderWispTransportWrite>>>,
 	) -> Result<(), EpoxyError> {
 		let extensions_vec: Vec<AnyProtocolExtensionBuilder> =
 			vec![AnyProtocolExtensionBuilder::new(
@@ -140,7 +150,11 @@ impl StreamProvider {
 		spawn_local(async move {
 			match fut.await {
 				Ok(_) => console_log!("epoxy: wisp multiplexor task ended successfully"),
-				Err(x) => console_error!("epoxy: wisp multiplexor task ended with an error: {} {:?}", x, x),
+				Err(x) => console_error!(
+					"epoxy: wisp multiplexor task ended with an error: {} {:?}",
+					x,
+					x
+				),
 			}
 			current_client.lock().await.take();
 		});

@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 async-compression = { version = "0.4.12", features = ["futures-io", "gzip", "brotli"], optional = true }
-async-trait = "0.1.81"
 bytes = "1.7.1"
 cfg-if = "1.0.0"
 event-listener = "5.3.1"

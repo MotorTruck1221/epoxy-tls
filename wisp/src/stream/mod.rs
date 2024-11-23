@@ -4,7 +4,7 @@ pub use compat::*;
 
 use crate::{
 	inner::WsEvent,
-	ws::{Frame, LockedWebSocketWrite, Payload},
+	ws::{Frame, LockedWebSocketWrite, Payload, WebSocketWrite},
 	AtomicCloseReason, CloseReason, Packet, Role, StreamType, WispError,
 };
 
@@ -21,7 +21,7 @@ use std::{
 };
 
 /// Read side of a multiplexor stream.
-pub struct MuxStreamRead {
+pub struct MuxStreamRead<W: WebSocketWrite + 'static> {
 	/// ID of the stream.
 	pub stream_id: u32,
 	/// Type of the stream.
@@ -29,7 +29,7 @@ pub struct MuxStreamRead {
 
 	role: Role,
 
-	tx: LockedWebSocketWrite,
+	tx: LockedWebSocketWrite<W>,
 	rx: mpsc::Receiver<Bytes>,
 
 	is_closed: Arc<AtomicBool>,
@@ -42,7 +42,7 @@ pub struct MuxStreamRead {
 	target_flow_control: u32,
 }
 
-impl MuxStreamRead {
+impl<W: WebSocketWrite + 'static> MuxStreamRead<W> {
 	/// Read an event from the stream.
 	pub async fn read(&self) -> Result<Option<Bytes>, WispError> {
 		if self.rx.is_empty() && self.is_closed.load(Ordering::Acquire) {
@@ -98,15 +98,15 @@ impl MuxStreamRead {
 }
 
 /// Write side of a multiplexor stream.
-pub struct MuxStreamWrite {
+pub struct MuxStreamWrite<W: WebSocketWrite + 'static> {
 	/// ID of the stream.
 	pub stream_id: u32,
 	/// Type of the stream.
 	pub stream_type: StreamType,
 
 	role: Role,
-	mux_tx: mpsc::Sender<WsEvent>,
-	tx: LockedWebSocketWrite,
+	mux_tx: mpsc::Sender<WsEvent<W>>,
+	tx: LockedWebSocketWrite<W>,
 
 	is_closed: Arc<AtomicBool>,
 	close_reason: Arc<AtomicCloseReason>,
@@ -116,7 +116,7 @@ pub struct MuxStreamWrite {
 	flow_control: Arc<AtomicU32>,
 }
 
-impl MuxStreamWrite {
+impl<W: WebSocketWrite + 'static> MuxStreamWrite<W> {
 	pub(crate) async fn write_payload_internal<'a>(
 		&self,
 		header: Frame<'static>,
@@ -169,7 +169,7 @@ impl MuxStreamWrite {
 	///     handle.close(0x01);
 	/// }
 	/// ```
-	pub fn get_close_handle(&self) -> MuxStreamCloser {
+	pub fn get_close_handle(&self) -> MuxStreamCloser<W> {
 		MuxStreamCloser {
 			stream_id: self.stream_id,
 			close_channel: self.mux_tx.clone(),
@@ -179,7 +179,7 @@ impl MuxStreamWrite {
 	}
 
 	/// Get a protocol extension stream to send protocol extension packets.
-	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream {
+	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream<W> {
 		MuxProtocolExtensionStream {
 			stream_id: self.stream_id,
 			tx: self.tx.clone(),
@@ -244,7 +244,7 @@ impl MuxStreamWrite {
 	}
 }
 
-impl Drop for MuxStreamWrite {
+impl<W: WebSocketWrite + 'static> Drop for MuxStreamWrite<W> {
 	fn drop(&mut self) {
 		if !self.is_closed.load(Ordering::Acquire) {
 			self.is_closed.store(true, Ordering::Release);
@@ -258,22 +258,22 @@ impl Drop for MuxStreamWrite {
 }
 
 /// Multiplexor stream.
-pub struct MuxStream {
+pub struct MuxStream<W: WebSocketWrite + 'static> {
 	/// ID of the stream.
 	pub stream_id: u32,
-	rx: MuxStreamRead,
-	tx: MuxStreamWrite,
+	rx: MuxStreamRead<W>,
+	tx: MuxStreamWrite<W>,
 }
 
-impl MuxStream {
+impl<W: WebSocketWrite + 'static> MuxStream<W> {
 	#[allow(clippy::too_many_arguments)]
 	pub(crate) fn new(
 		stream_id: u32,
 		role: Role,
 		stream_type: StreamType,
 		rx: mpsc::Receiver<Bytes>,
-		mux_tx: mpsc::Sender<WsEvent>,
-		tx: LockedWebSocketWrite,
+		mux_tx: mpsc::Sender<WsEvent<W>>,
+		tx: LockedWebSocketWrite<W>,
 		is_closed: Arc<AtomicBool>,
 		is_closed_event: Arc<Event>,
 		close_reason: Arc<AtomicCloseReason>,
@@ -339,12 +339,12 @@ impl MuxStream {
 	///     handle.close(0x01);
 	/// }
 	/// ```
-	pub fn get_close_handle(&self) -> MuxStreamCloser {
+	pub fn get_close_handle(&self) -> MuxStreamCloser<W> {
 		self.tx.get_close_handle()
 	}
 
 	/// Get a protocol extension stream to send protocol extension packets.
-	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream {
+	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream<W> {
 		self.tx.get_protocol_extension_stream()
 	}
 
@@ -359,7 +359,7 @@ impl MuxStream {
 	}
 
 	/// Split the stream into read and write parts, consuming it.
-	pub fn into_split(self) -> (MuxStreamRead, MuxStreamWrite) {
+	pub fn into_split(self) -> (MuxStreamRead<W>, MuxStreamWrite<W>) {
 		(self.rx, self.tx)
 	}
 
@@ -374,15 +374,15 @@ impl MuxStream {
 
 /// Close handle for a multiplexor stream.
 #[derive(Clone)]
-pub struct MuxStreamCloser {
+pub struct MuxStreamCloser<W: WebSocketWrite + 'static> {
 	/// ID of the stream.
 	pub stream_id: u32,
-	close_channel: mpsc::Sender<WsEvent>,
+	close_channel: mpsc::Sender<WsEvent<W>>,
 	is_closed: Arc<AtomicBool>,
 	close_reason: Arc<AtomicCloseReason>,
 }
 
-impl MuxStreamCloser {
+impl<W: WebSocketWrite + 'static> MuxStreamCloser<W> {
 	/// Close the stream. You will no longer be able to write or read after this has been called.
 	pub async fn close(&self, reason: CloseReason) -> Result<(), WispError> {
 		if self.is_closed.load(Ordering::Acquire) {
@@ -414,14 +414,14 @@ impl MuxStreamCloser {
 }
 
 /// Stream for sending arbitrary protocol extension packets.
-pub struct MuxProtocolExtensionStream {
+pub struct MuxProtocolExtensionStream<W: WebSocketWrite + 'static> {
 	/// ID of the stream.
 	pub stream_id: u32,
-	pub(crate) tx: LockedWebSocketWrite,
+	pub(crate) tx: LockedWebSocketWrite<W>,
 	pub(crate) is_closed: Arc<AtomicBool>,
 }
 
-impl MuxProtocolExtensionStream {
+impl<W: WebSocketWrite + 'static> MuxProtocolExtensionStream<W> {
 	/// Send a protocol extension packet with this stream's ID.
 	pub async fn send(&self, packet_type: u8, data: Bytes) -> Result<(), WispError> {
 		if self.is_closed.load(Ordering::Acquire) {

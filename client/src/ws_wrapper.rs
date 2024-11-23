@@ -3,7 +3,6 @@ use std::sync::{
 	Arc,
 };
 
-use async_trait::async_trait;
 use bytes::BytesMut;
 use event_listener::Event;
 use flume::Receiver;
@@ -14,7 +13,7 @@ use thiserror::Error;
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 use wisp_mux::{
-	ws::{Frame, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
+	ws::{Frame, LockingWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	WispError,
 };
 
@@ -66,11 +65,10 @@ pub struct WebSocketReader {
 	close_event: Arc<Event>,
 }
 
-#[async_trait]
 impl WebSocketRead for WebSocketReader {
 	async fn wisp_read_frame(
 		&mut self,
-		_: &LockedWebSocketWrite,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<Frame<'static>, WispError> {
 		use WebSocketMessage as M;
 		if self.closed.load(Ordering::Acquire) {
@@ -185,7 +183,6 @@ impl WebSocketWrapper {
 	}
 }
 
-#[async_trait]
 impl WebSocketWrite for WebSocketWrapper {
 	async fn wisp_write_frame(&mut self, frame: Frame<'_>) -> Result<(), WispError> {
 		use wisp_mux::ws::OpCode::*;

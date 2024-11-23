@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		}));
 		threads.push(tokio::spawn(async move {
 			loop {
-				cr.read().await;
+				let _ = cr.read().await;
 			}
 		}));
 	}

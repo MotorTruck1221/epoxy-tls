@@ -1,12 +1,11 @@
 //! WebSocketRead + WebSocketWrite implementation for generic `Stream + Sink`s.
 
-use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::error::Error;
 
 use crate::{
-	ws::{Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead, WebSocketWrite},
+	ws::{Frame, LockingWebSocketWrite, OpCode, Payload, WebSocketRead, WebSocketWrite},
 	WispError,
 };
 
@@ -30,13 +29,12 @@ impl<T: Stream<Item = Result<BytesMut, E>> + Send + Unpin, E: Error + Sync + Sen
 	}
 }
 
-#[async_trait]
 impl<T: Stream<Item = Result<BytesMut, E>> + Send + Unpin, E: Error + Sync + Send + 'static>
 	WebSocketRead for GenericWebSocketRead<T, E>
 {
 	async fn wisp_read_frame(
 		&mut self,
-		_tx: &LockedWebSocketWrite,
+		_tx: &dyn LockingWebSocketWrite,
 	) -> Result<Frame<'static>, WispError> {
 		match self.0.next().await {
 			Some(data) => Ok(Frame::binary(Payload::Bytes(
@@ -67,7 +65,6 @@ impl<T: Sink<Bytes, Error = E> + Send + Unpin, E: Error + Sync + Send + 'static>
 	}
 }
 
-#[async_trait]
 impl<T: Sink<Bytes, Error = E> + Send + Unpin, E: Error + Sync + Send + 'static> WebSocketWrite
 	for GenericWebSocketWrite<T, E>
 {

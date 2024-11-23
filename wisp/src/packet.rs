@@ -2,7 +2,10 @@ use std::fmt::Display;
 
 use crate::{
 	extensions::{AnyProtocolExtension, AnyProtocolExtensionBuilder},
-	ws::{self, Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead},
+	ws::{
+		self, DynWebSocketRead, Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead,
+		WebSocketWrite,
+	},
 	Role, WispError, WISP_VERSION,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -527,11 +530,11 @@ impl<'a> Packet<'a> {
 		}
 	}
 
-	pub(crate) async fn maybe_handle_extension(
+	pub(crate) async fn maybe_handle_extension<R: WebSocketRead + 'static, W: WebSocketWrite>(
 		frame: Frame<'a>,
 		extensions: &mut [AnyProtocolExtension],
-		read: &mut (dyn WebSocketRead + Send),
-		write: &LockedWebSocketWrite,
+		read: &mut R,
+		write: &LockedWebSocketWrite<W>,
 	) -> Result<Option<Self>, WispError> {
 		if !frame.finished {
 			return Err(WispError::WsFrameNotFinished);
@@ -568,7 +571,11 @@ impl<'a> Packet<'a> {
 					.find(|x| x.get_supported_packets().iter().any(|x| *x == packet_type))
 				{
 					extension
-						.handle_packet(BytesMut::from(bytes).freeze(), read, write)
+						.handle_packet(
+							BytesMut::from(bytes).freeze(),
+							DynWebSocketRead::from_mut(read),
+							write,
+						)
 						.await?;
 					Ok(None)
 				} else {

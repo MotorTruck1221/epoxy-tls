@@ -44,7 +44,6 @@ pub enum ClientStream {
 	Invalid,
 }
 
-
 // taken from rust 1.82.0
 fn ipv4_is_global(addr: &Ipv4Addr) -> bool {
 	!(addr.octets()[0] == 0 // "This network"

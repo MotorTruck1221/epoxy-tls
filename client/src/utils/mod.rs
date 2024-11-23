@@ -8,7 +8,6 @@ use std::{
 	task::{Context, Poll},
 };
 
-use async_trait::async_trait;
 use bytes::{buf::UninitSlice, BufMut, Bytes, BytesMut};
 use futures_util::{ready, AsyncRead, Future, Stream};
 use http::{HeaderValue, Uri};
@@ -179,7 +178,6 @@ pub struct WispTransportWrite {
 	pub inner: SendWrapper<WritableStreamDefaultWriter>,
 }
 
-#[async_trait]
 impl WebSocketWrite for WispTransportWrite {
 	async fn wisp_write_frame(&mut self, frame: Frame<'_>) -> Result<(), WispError> {
 		SendWrapper::new(async {

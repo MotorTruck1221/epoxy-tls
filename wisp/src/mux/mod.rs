@@ -8,7 +8,7 @@ pub use server::ServerMux;
 
 use crate::{
 	extensions::{udp::UdpProtocolExtension, AnyProtocolExtension, AnyProtocolExtensionBuilder},
-	ws::LockedWebSocketWrite,
+	ws::{LockedWebSocketWrite, WebSocketWrite},
 	CloseReason, Packet, PacketType, Role, WispError,
 };
 
@@ -35,8 +35,8 @@ impl WispHandshakeResultKind {
 	}
 }
 
-async fn send_info_packet(
-	write: &LockedWebSocketWrite,
+async fn send_info_packet<W: WebSocketWrite>(
+	write: &LockedWebSocketWrite<W>,
 	builders: &mut [AnyProtocolExtensionBuilder],
 ) -> Result<(), WispError> {
 	write

@@ -2,7 +2,7 @@ use std::{fmt::Display, future::Future, io::Cursor};
 
 use anyhow::Context;
 use bytes::Bytes;
-use fastwebsockets::{upgrade::UpgradeFut, FragmentCollector};
+use fastwebsockets::{upgrade::UpgradeFut, FragmentCollector, WebSocketRead, WebSocketWrite};
 use http_body_util::Full;
 use hyper::{
 	body::Incoming, header::SEC_WEBSOCKET_PROTOCOL, server::conn::http1::Builder,
@@ -10,25 +10,30 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use log::{debug, error, trace};
-use tokio::io::AsyncReadExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use wisp_mux::{
 	generic::{GenericWebSocketRead, GenericWebSocketWrite},
-	ws::{WebSocketRead, WebSocketWrite},
+	ws::{EitherWebSocketRead, EitherWebSocketWrite},
 };
 
 use crate::{
 	config::SocketTransport,
 	generate_stats,
-	listener::{ServerStream, ServerStreamExt},
+	listener::{ServerStream, ServerStreamExt, ServerStreamRead, ServerStreamWrite},
 	stream::WebSocketStreamWrapper,
+	util_chain::{chain, Chain},
 	CONFIG,
 };
 
-pub type WispResult = (
-	Box<dyn WebSocketRead + Send>,
-	Box<dyn WebSocketWrite + Send>,
-);
+pub type WispStreamRead = EitherWebSocketRead<
+	WebSocketRead<Chain<Cursor<Bytes>, ServerStreamRead>>,
+	GenericWebSocketRead<FramedRead<ServerStreamRead, LengthDelimitedCodec>, std::io::Error>,
+>;
+pub type WispStreamWrite = EitherWebSocketWrite<
+	WebSocketWrite<ServerStreamWrite>,
+	GenericWebSocketWrite<FramedWrite<ServerStreamWrite, LengthDelimitedCodec>, std::io::Error>,
+>;
+pub type WispResult = (WispStreamRead, WispStreamWrite);
 
 pub enum ServerRouteResult {
 	Wisp(WispResult, bool),
@@ -190,12 +195,15 @@ pub async fn route(
 												.downcast::<TokioIo<ServerStream>>()
 												.unwrap();
 											let (r, w) = parts.io.into_inner().split();
-											(Cursor::new(parts.read_buf).chain(r), w)
+											(chain(Cursor::new(parts.read_buf), r), w)
 										});
 
 										(callback)(
 											ServerRouteResult::Wisp(
-												(Box::new(read), Box::new(write)),
+												(
+													EitherWebSocketRead::Left(read),
+													EitherWebSocketWrite::Left(write),
+												),
 												is_v2,
 											),
 											maybe_ip,
@@ -229,7 +237,13 @@ pub async fn route(
 			let write = GenericWebSocketWrite::new(FramedWrite::new(write, codec));
 
 			(callback)(
-				ServerRouteResult::Wisp((Box::new(read), Box::new(write)), true),
+				ServerRouteResult::Wisp(
+					(
+						EitherWebSocketRead::Right(read),
+						EitherWebSocketWrite::Right(write),
+					),
+					true,
+				),
 				None,
 			);
 		}

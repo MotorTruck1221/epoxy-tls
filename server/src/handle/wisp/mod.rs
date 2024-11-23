@@ -25,7 +25,7 @@ use wisp_mux::{
 };
 
 use crate::{
-	route::WispResult,
+	route::{WispResult, WispStreamWrite},
 	stream::{ClientStream, ResolvedPacket},
 	CLIENTS, CONFIG,
 };
@@ -58,7 +58,7 @@ async fn copy_read_fast(
 }
 
 async fn copy_write_fast(
-	muxtx: MuxStreamWrite,
+	muxtx: MuxStreamWrite<WispStreamWrite>,
 	tcprx: OwnedReadHalf,
 	#[cfg(feature = "speed-limit")] limiter: async_speed_limit::Limiter<
 		async_speed_limit::clock::StandardClock,
@@ -83,7 +83,7 @@ async fn copy_write_fast(
 
 async fn handle_stream(
 	connect: ConnectPacket,
-	muxstream: MuxStream,
+	muxstream: MuxStream<WispStreamWrite>,
 	id: String,
 	event: Arc<Event>,
 	#[cfg(feature = "twisp")] twisp_map: twisp::TwispMap,

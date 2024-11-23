@@ -11,7 +11,7 @@ use ed25519::{
 };
 
 use crate::{
-	ws::{LockedWebSocketWrite, WebSocketRead},
+	ws::{DynWebSocketRead, LockingWebSocketWrite},
 	Role, WispError,
 };
 
@@ -183,8 +183,8 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 
 	async fn handle_handshake(
 		&mut self,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
@@ -192,8 +192,8 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 	async fn handle_packet(
 		&mut self,
 		_: Bytes,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}

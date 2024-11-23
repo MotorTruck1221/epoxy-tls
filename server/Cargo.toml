@@ -24,6 +24,7 @@ lazy_static = "1.5.0"
 libc = { version = "0.2.158", optional = true }
 log = { version = "0.4.22", features = ["serde", "std"] }
 nix = { version = "0.29.0", features = ["term"] }
+pin-project-lite = "0.2.15"
 pty-process = { version = "0.4.0", features = ["async", "tokio"], optional = true }
 regex = "1.10.6"
 rustls-pemfile = "2.1.3"

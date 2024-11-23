@@ -98,7 +98,10 @@ impl MuxStreamIoStream {
 impl Stream for MuxStreamIoStream {
 	type Item = Result<Bytes, std::io::Error>;
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		self.project().rx.poll_next(cx).map_err(std::io::Error::other)
+		self.project()
+			.rx
+			.poll_next(cx)
+			.map_err(std::io::Error::other)
 	}
 }
 

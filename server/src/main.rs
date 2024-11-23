@@ -37,6 +37,8 @@ mod route;
 mod stats;
 #[doc(hidden)]
 mod stream;
+#[doc(hidden)]
+mod util_chain;
 
 #[doc(hidden)]
 type Client = (DashMap<Uuid, (ConnectPacket, ConnectPacket)>, bool);

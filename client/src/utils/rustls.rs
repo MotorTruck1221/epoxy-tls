@@ -1,5 +1,8 @@
 use std::{
-	io::ErrorKind, pin::Pin, sync::Arc, task::{Context, Poll}
+	io::ErrorKind,
+	pin::Pin,
+	sync::Arc,
+	task::{Context, Poll},
 };
 
 use futures_rustls::{

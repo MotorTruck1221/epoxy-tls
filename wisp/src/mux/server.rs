@@ -11,7 +11,7 @@ use futures::channel::oneshot;
 
 use crate::{
 	extensions::AnyProtocolExtension,
-	ws::{LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
+	ws::{DynWebSocketRead, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	CloseReason, ConnectPacket, MuxProtocolExtensionStream, MuxStream, Packet, PacketType, Role,
 	WispError,
 };
@@ -23,9 +23,9 @@ use super::{
 	WispV2Handshake,
 };
 
-async fn handshake<R: WebSocketRead>(
+async fn handshake<R: WebSocketRead + 'static, W: WebSocketWrite>(
 	rx: &mut R,
-	tx: &LockedWebSocketWrite,
+	tx: &LockedWebSocketWrite<W>,
 	buffer_size: u32,
 	v2_info: Option<WispV2Handshake>,
 ) -> Result<WispHandshakeResult, WispError> {
@@ -47,7 +47,9 @@ async fn handshake<R: WebSocketRead>(
 			let mut supported_extensions = get_supported_extensions(info.extensions, &mut builders);
 
 			for extension in supported_extensions.iter_mut() {
-				extension.handle_handshake(rx, tx).await?;
+				extension
+					.handle_handshake(DynWebSocketRead::from_mut(rx), tx)
+					.await?;
 			}
 
 			// v2 client
@@ -79,36 +81,38 @@ async fn handshake<R: WebSocketRead>(
 }
 
 /// Server-side multiplexor.
-pub struct ServerMux {
+pub struct ServerMux<W: WebSocketWrite + 'static> {
 	/// Whether the connection was downgraded to Wisp v1.
 	///
 	/// If this variable is true you must assume no extensions are supported.
 	pub downgraded: bool,
 	/// Extensions that are supported by both sides.
 	pub supported_extensions: Vec<AnyProtocolExtension>,
-	actor_tx: mpsc::Sender<WsEvent>,
-	muxstream_recv: mpsc::Receiver<(ConnectPacket, MuxStream)>,
-	tx: LockedWebSocketWrite,
+	actor_tx: mpsc::Sender<WsEvent<W>>,
+	muxstream_recv: mpsc::Receiver<(ConnectPacket, MuxStream<W>)>,
+	tx: LockedWebSocketWrite<W>,
 	actor_exited: Arc<AtomicBool>,
 }
 
-impl ServerMux {
+impl<W: WebSocketWrite + 'static> ServerMux<W> {
 	/// Create a new server-side multiplexor.
 	///
 	/// If `wisp_v2` is None a Wisp v1 connection is created otherwise a Wisp v2 connection is created.
 	/// **It is not guaranteed that all extensions you specify are available.** You must manually check
 	/// if the extensions you need are available after the multiplexor has been created.
-	pub async fn create<R, W>(
+	pub async fn create<R>(
 		mut rx: R,
 		tx: W,
 		buffer_size: u32,
 		wisp_v2: Option<WispV2Handshake>,
-	) -> Result<MuxResult<ServerMux, impl Future<Output = Result<(), WispError>> + Send>, WispError>
+	) -> Result<
+		MuxResult<ServerMux<W>, impl Future<Output = Result<(), WispError>> + Send>,
+		WispError,
+	>
 	where
-		R: WebSocketRead + Send,
-		W: WebSocketWrite + Send + 'static,
+		R: WebSocketRead + Send + 'static,
 	{
-		let tx = LockedWebSocketWrite::new(Box::new(tx));
+		let tx = LockedWebSocketWrite::new(tx);
 		let ret_tx = tx.clone();
 		let ret = async {
 			let handshake_result = handshake(&mut rx, &tx, buffer_size, wisp_v2).await?;
@@ -165,7 +169,7 @@ impl ServerMux {
 	}
 
 	/// Wait for a stream to be created.
-	pub async fn server_new_stream(&self) -> Option<(ConnectPacket, MuxStream)> {
+	pub async fn server_new_stream(&self) -> Option<(ConnectPacket, MuxStream<W>)> {
 		if self.actor_exited.load(Ordering::Acquire) {
 			return None;
 		}
@@ -210,7 +214,7 @@ impl ServerMux {
 	}
 
 	/// Get a protocol extension stream for sending packets with stream id 0.
-	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream {
+	pub fn get_protocol_extension_stream(&self) -> MuxProtocolExtensionStream<W> {
 		MuxProtocolExtensionStream {
 			stream_id: 0,
 			tx: self.tx.clone(),
@@ -219,13 +223,13 @@ impl ServerMux {
 	}
 }
 
-impl Drop for ServerMux {
+impl<W: WebSocketWrite + 'static> Drop for ServerMux<W> {
 	fn drop(&mut self) {
 		let _ = self.actor_tx.send(WsEvent::EndFut(None));
 	}
 }
 
-impl Multiplexor for ServerMux {
+impl<W: WebSocketWrite + 'static> Multiplexor for ServerMux<W> {
 	fn has_extension(&self, extension_id: u8) -> bool {
 		self.supported_extensions
 			.iter()

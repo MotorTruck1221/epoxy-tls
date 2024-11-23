@@ -1,5 +1,5 @@
 #![feature(let_chains, impl_trait_in_assoc_type)]
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, pin::Pin, str::FromStr, sync::Arc};
 
 #[cfg(feature = "full")]
 use async_compression::futures::bufread as async_comp;
@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use cfg_if::cfg_if;
 #[cfg(feature = "full")]
 use futures_util::future::Either;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use http::{
 	header::{
 		InvalidHeaderName, InvalidHeaderValue, ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH,
@@ -41,7 +41,7 @@ use websocket::EpoxyWebSocket;
 use wisp_mux::StreamType;
 use wisp_mux::{
 	generic::GenericWebSocketRead,
-	ws::{WebSocketRead, WebSocketWrite},
+	ws::{EitherWebSocketRead, EitherWebSocketWrite},
 	CloseReason,
 };
 use ws_wrapper::WebSocketWrapper;
@@ -343,7 +343,7 @@ fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
 			}
 			.into();
 
-			let read = GenericWebSocketRead::new(SendWrapper::new(
+			let read = GenericWebSocketRead::new(Box::pin(SendWrapper::new(
 				wasm_streams::ReadableStream::from_raw(object_get(&transport, "read").into())
 					.into_stream()
 					.map(|x| {
@@ -355,15 +355,16 @@ fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
 							Uint8Array::new(&arr).to_vec().as_slice(),
 						))
 					}),
-			));
+			))
+				as Pin<Box<dyn Stream<Item = Result<BytesMut, EpoxyError>> + Send>>);
 			let write: WritableStream = object_get(&transport, "write").into();
 			let write = WispTransportWrite {
 				inner: SendWrapper::new(write.get_writer().map_err(EpoxyError::wisp_transport)?),
 			};
 
 			Ok((
-				Box::new(read) as Box<dyn WebSocketRead + Send>,
-				Box::new(write) as Box<dyn WebSocketWrite + Send>,
+				EitherWebSocketRead::Right(read),
+				EitherWebSocketWrite::Right(write),
 			))
 		}))
 	})
@@ -421,8 +422,8 @@ impl EpoxyClient {
 							}
 						}
 						Ok((
-							Box::new(read) as Box<dyn WebSocketRead + Send>,
-							Box::new(write) as Box<dyn WebSocketWrite + Send>,
+							EitherWebSocketRead::Left(read),
+							EitherWebSocketWrite::Left(write),
 						))
 					})
 				}),
