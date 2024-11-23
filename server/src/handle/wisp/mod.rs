@@ -34,6 +34,11 @@ async fn copy_read_fast(
 	muxrx: MuxStreamAsyncRead,
 	mut tcptx: OwnedWriteHalf,
 ) -> std::io::Result<()> {
+	#[cfg(feature = "speed-limit")]
+	let limiter = async_speed_limit::Limiter::builder(CONFIG.stream.write_limit)
+		.refill(Duration::from_secs(1))
+		.clock(async_speed_limit::clock::StandardClock)
+		.build();
 	let mut muxrx = muxrx.compat();
 	loop {
 		let buf = muxrx.fill_buf().await?;
@@ -41,6 +46,9 @@ async fn copy_read_fast(
 			tcptx.flush().await?;
 			return Ok(());
 		}
+
+		#[cfg(feature = "speed-limit")]
+		limiter.consume(buf.len()).await;
 
 		let i = tcptx.write(buf).await?;
 		if i == 0 {
@@ -52,6 +60,11 @@ async fn copy_read_fast(
 }
 
 async fn copy_write_fast(muxtx: MuxStreamWrite, tcprx: OwnedReadHalf) -> anyhow::Result<()> {
+	#[cfg(feature = "speed-limit")]
+	let limiter = async_speed_limit::Limiter::builder(CONFIG.stream.read_limit)
+		.refill(Duration::from_secs(1))
+		.clock(async_speed_limit::clock::StandardClock)
+		.build();
 	let mut tcprx = BufReader::with_capacity(CONFIG.stream.buffer_size, tcprx);
 	loop {
 		let buf = tcprx.fill_buf().await?;
@@ -60,6 +73,9 @@ async fn copy_write_fast(muxtx: MuxStreamWrite, tcprx: OwnedReadHalf) -> anyhow:
 		if len == 0 {
 			return Ok(());
 		}
+
+		#[cfg(feature = "speed-limit")]
+		limiter.consume(buf.len()).await;
 
 		muxtx.write(&buf).await?;
 		tcprx.consume(len);

@@ -181,6 +181,13 @@ pub struct StreamConfig {
 	/// Buffer size of reads from TCP sockets.
 	pub buffer_size: usize,
 
+	#[cfg(feature = "speed-limit")]
+	/// Remote stream read limit in bytes/second.
+	pub read_limit: f64,
+	#[cfg(feature = "speed-limit")]
+	/// Remote stream write limit in bytes/second.
+	pub write_limit: f64,
+
 	/// Whether or not to allow Wisp clients to create UDP streams.
 	pub allow_udp: bool,
 	/// Whether or not to enable nonstandard legacy wsproxy UDP streams.
@@ -406,6 +413,11 @@ impl Default for StreamConfig {
 		Self {
 			tcp_nodelay: false,
 			buffer_size: 16384,
+
+			#[cfg(feature = "speed-limit")]
+			read_limit: f64::INFINITY,
+			#[cfg(feature = "speed-limit")]
+			write_limit: f64::INFINITY,
 
 			allow_udp: true,
 			allow_wsproxy_udp: false,

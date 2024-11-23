@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+async-speed-limit = { version = "0.4.2", optional = true }
 async-trait = { version = "0.1.81", optional = true }
 bytes = "1.7.1"
 cfg-if = "1.0.0"
@@ -47,6 +48,7 @@ yaml = ["dep:serde_yaml"]
 toml = ["dep:toml"]
 
 twisp = ["dep:pty-process", "dep:libc", "dep:async-trait", "dep:shell-words"]
+speed-limit = ["dep:async-speed-limit"]
 
 [build-dependencies]
 vergen-git2 = { version = "1.0.0", features = ["rustc"] }
