@@ -19,7 +19,7 @@ use wisp_mux::{
 
 use crate::{handle::wisp::utils::get_certificates_from_paths, CLI, CONFIG, RESOLVER};
 
-const VERSION_STRING: &str = concat!(
+pub const VERSION_STRING: &str = concat!(
 	"git ",
 	env!("VERGEN_GIT_SHA"),
 	", dirty ",
@@ -134,10 +134,12 @@ pub enum ProtocolExtensionAuth {
 	Certificate,
 }
 
+#[doc(hidden)]
 fn default_motd() -> String {
 	format!("epoxy_server ({})", VERSION_STRING)
 }
 
+#[doc(hidden)]
 fn is_default_motd(str: &String) -> bool {
 	*str == default_motd()
 }
@@ -160,10 +162,10 @@ pub struct WispConfig {
 	pub auth_extension: Option<ProtocolExtensionAuth>,
 
 	#[cfg(feature = "speed-limit")]
-	/// Read limit in bytes/second for all streams.
+	/// Read limit in bytes/second for all streams in a wisp connection.
 	pub read_limit: f64,
 	#[cfg(feature = "speed-limit")]
-	/// Write limit in bytes/second for all streams.
+	/// Write limit in bytes/second for all streams in a wisp connection.
 	pub write_limit: f64,
 
 	#[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -235,11 +237,15 @@ pub struct StreamConfig {
 #[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+	/// Server-specific config.
 	pub server: ServerConfig,
+	/// Wisp-specific configuration.
 	pub wisp: WispConfig,
+	/// Individual stream-specific configuration.
 	pub stream: StreamConfig,
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
 struct ConfigCache {
 	pub blocked_ports: Vec<RangeInclusive<u16>>,
@@ -256,6 +262,7 @@ struct ConfigCache {
 }
 
 lazy_static! {
+	#[doc(hidden)]
 	static ref CONFIG_CACHE: ConfigCache = {
 		ConfigCache {
 			allowed_ports: CONFIG
@@ -283,6 +290,7 @@ lazy_static! {
 	};
 }
 
+#[doc(hidden)]
 pub async fn validate_config_cache() {
 	// constructs regexes
 	let _ = CONFIG_CACHE.allowed_ports;
@@ -358,6 +366,7 @@ impl Default for WispConfig {
 }
 
 impl WispConfig {
+	#[doc(hidden)]
 	pub async fn to_opts(&self) -> anyhow::Result<(Option<WispV2Handshake>, Vec<u8>, u32)> {
 		if self.wisp_v2 {
 			let mut extensions: Vec<AnyProtocolExtensionBuilder> = Vec::new();
@@ -449,40 +458,49 @@ impl Default for StreamConfig {
 }
 
 impl StreamConfig {
+	#[doc(hidden)]
 	pub fn allowed_ports(&self) -> &'static [RangeInclusive<u16>] {
 		&CONFIG_CACHE.allowed_ports
 	}
 
+	#[doc(hidden)]
 	pub fn blocked_ports(&self) -> &'static [RangeInclusive<u16>] {
 		&CONFIG_CACHE.blocked_ports
 	}
 
+	#[doc(hidden)]
 	pub fn allowed_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.allowed_hosts
 	}
 
+	#[doc(hidden)]
 	pub fn blocked_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.blocked_hosts
 	}
 
+	#[doc(hidden)]
 	pub fn allowed_tcp_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.allowed_tcp_hosts
 	}
 
+	#[doc(hidden)]
 	pub fn blocked_tcp_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.blocked_tcp_hosts
 	}
 
+	#[doc(hidden)]
 	pub fn allowed_udp_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.allowed_udp_hosts
 	}
 
+	#[doc(hidden)]
 	pub fn blocked_udp_hosts(&self) -> &RegexSet {
 		&CONFIG_CACHE.blocked_udp_hosts
 	}
 }
 
 impl Config {
+	#[doc(hidden)]
 	pub fn ser(&self) -> anyhow::Result<String> {
 		Ok(match CLI.format {
 			ConfigFormat::Json => serde_json::to_string_pretty(self)?,
@@ -493,6 +511,7 @@ impl Config {
 		})
 	}
 
+	#[doc(hidden)]
 	pub fn de(string: String) -> anyhow::Result<Self> {
 		Ok(match CLI.format {
 			ConfigFormat::Json => serde_json::from_str(&string)?,
@@ -505,6 +524,7 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+#[doc(hidden)]
 pub enum ConfigFormat {
 	Json,
 	#[cfg(feature = "toml")]
@@ -528,6 +548,7 @@ impl Default for ConfigFormat {
 }
 
 /// Performant server implementation of the Wisp protocol in Rust, made for epoxy.
+#[doc(hidden)]
 #[derive(Parser, Debug)]
 #[command(version = VERSION_STRING)]
 pub struct Cli {

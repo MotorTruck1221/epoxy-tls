@@ -1,4 +1,4 @@
-#![feature(ip)]
+#![doc(html_no_source)]
 #![deny(clippy::todo)]
 #![allow(unexpected_cfgs)]
 
@@ -26,15 +26,22 @@ use tokio::{
 use uuid::Uuid;
 use wisp_mux::ConnectPacket;
 
-mod config;
+pub mod config;
+#[doc(hidden)]
 mod handle;
+#[doc(hidden)]
 mod listener;
+#[doc(hidden)]
 mod route;
+#[doc(hidden)]
 mod stats;
+#[doc(hidden)]
 mod stream;
 
+#[doc(hidden)]
 type Client = (DashMap<Uuid, (ConnectPacket, ConnectPacket)>, bool);
 
+#[doc(hidden)]
 #[derive(Debug)]
 pub enum Resolver {
 	Hickory(TokioAsyncResolver),
@@ -60,7 +67,9 @@ impl Resolver {
 }
 
 lazy_static! {
+	#[doc(hidden)]
 	pub static ref CLI: Cli = Cli::parse();
+	#[doc(hidden)]
 	pub static ref CONFIG: Config = {
 		if let Some(path) = &CLI.config {
 			Config::de(
@@ -74,7 +83,9 @@ lazy_static! {
 			Config::default()
 		}
 	};
+	#[doc(hidden)]
 	pub static ref CLIENTS: DashMap<String, Client> = DashMap::new();
+	#[doc(hidden)]
 	pub static ref RESOLVER: Resolver = {
 		if CONFIG.stream.dns_servers.is_empty() {
 			if let Ok((config, opts)) = read_system_conf() {
@@ -96,9 +107,11 @@ lazy_static! {
 	};
 }
 
+#[doc(hidden)]
 #[global_allocator]
 static JEMALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[doc(hidden)]
 fn main() -> anyhow::Result<()> {
 	if CLI.default_config {
 		println!("{}", Config::default().ser()?);
@@ -204,6 +217,7 @@ fn main() -> anyhow::Result<()> {
 	})
 }
 
+#[doc(hidden)]
 fn handle_stream(stream: ServerRouteResult, id: String) {
 	tokio::spawn(async move {
 		CLIENTS.insert(id.clone(), (DashMap::new(), false));
