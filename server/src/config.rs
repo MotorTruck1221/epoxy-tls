@@ -84,7 +84,7 @@ pub enum StatsEndpoint {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
 	/// Address and socket type to listen on.
 	pub bind: BindAddr,
@@ -147,7 +147,7 @@ fn is_default_motd(str: &String) -> bool {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WispConfig {
 	/// Allow legacy wsproxy connections.
 	pub allow_wsproxy: bool,
@@ -185,7 +185,7 @@ pub struct WispConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StreamConfig {
 	/// Whether or not to enable TCP nodelay.
 	pub tcp_nodelay: bool,
@@ -237,7 +237,7 @@ pub struct StreamConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
 	/// Server-specific config.
 	pub server: ServerConfig,
