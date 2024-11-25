@@ -132,8 +132,12 @@ async fn handle_stream(
 		id, uuid, requested_stream, resolved_stream
 	);
 
-	if let Some(client) = CLIENTS.get(&id) {
-		client.0.insert(uuid, (requested_stream, resolved_stream));
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client
+			.0
+			.lock()
+			.await
+			.insert(uuid, (requested_stream, resolved_stream));
 	}
 
 	let forward_fut = async {
@@ -227,8 +231,8 @@ async fn handle_stream(
 
 	debug!("stream uuid {:?} disconnected for client id {:?}", uuid, id);
 
-	if let Some(client) = CLIENTS.get(&id) {
-		client.0.remove(&uuid);
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client.0.lock().await.remove(&uuid);
 	}
 }
 

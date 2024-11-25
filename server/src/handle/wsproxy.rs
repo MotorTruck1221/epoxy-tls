@@ -90,11 +90,13 @@ pub async fn handle_wsproxy(
 		id, uuid, requested_stream, resolved_stream
 	);
 
-	CLIENTS
-		.get(&id)
-		.unwrap()
-		.0
-		.insert(uuid, (requested_stream, resolved_stream));
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client
+			.0
+			.lock()
+			.await
+			.insert(uuid, (requested_stream, resolved_stream));
+	}
 
 	match stream {
 		ClientStream::Tcp(stream) => {
@@ -183,6 +185,10 @@ pub async fn handle_wsproxy(
 		"wsproxy client id {:?} disconnected (stream uuid {:?})",
 		id, uuid
 	);
+
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client.0.lock().await.remove(&uuid);
+	}
 
 	Ok(())
 }

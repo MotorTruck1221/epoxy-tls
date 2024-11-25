@@ -2,12 +2,11 @@
 #![deny(clippy::todo)]
 #![allow(unexpected_cfgs)]
 
-use std::{fs::read_to_string, net::IpAddr};
+use std::{collections::HashMap, fs::read_to_string, net::IpAddr};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{validate_config_cache, Cli, Config, RuntimeFlavor};
-use dashmap::DashMap;
 use handle::{handle_wisp, handle_wsproxy};
 use hickory_resolver::{
 	config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
@@ -22,6 +21,7 @@ use stats::generate_stats;
 use tokio::{
 	runtime,
 	signal::unix::{signal, SignalKind},
+	sync::Mutex,
 };
 use uuid::Uuid;
 use wisp_mux::ConnectPacket;
@@ -41,7 +41,7 @@ mod stream;
 mod util_chain;
 
 #[doc(hidden)]
-type Client = (DashMap<Uuid, (ConnectPacket, ConnectPacket)>, bool);
+type Client = (Mutex<HashMap<Uuid, (ConnectPacket, ConnectPacket)>>, bool);
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -86,7 +86,7 @@ lazy_static! {
 		}
 	};
 	#[doc(hidden)]
-	pub static ref CLIENTS: DashMap<String, Client> = DashMap::new();
+	pub static ref CLIENTS: Mutex<HashMap<String, Client>> = Mutex::new(HashMap::new());
 	#[doc(hidden)]
 	pub static ref RESOLVER: Resolver = {
 		if CONFIG.stream.dns_servers.is_empty() {
@@ -160,7 +160,7 @@ async fn async_main() -> Result<()> {
 	tokio::spawn(async {
 		let mut sig = signal(SignalKind::user_defined1()).unwrap();
 		while sig.recv().await.is_some() {
-			match generate_stats() {
+			match generate_stats().await {
 				Ok(stats) => info!("Stats:\n{}", stats),
 				Err(err) => error!("error while creating stats {:?}", err),
 			}
@@ -234,7 +234,10 @@ async fn async_main() -> Result<()> {
 #[doc(hidden)]
 fn handle_stream(stream: ServerRouteResult, id: String) {
 	tokio::spawn(async move {
-		CLIENTS.insert(id.clone(), (DashMap::new(), false));
+		CLIENTS
+			.lock()
+			.await
+			.insert(id.clone(), (Mutex::new(HashMap::new()), false));
 		let res = match stream {
 			ServerRouteResult::Wisp(stream, is_v2) => handle_wisp(stream, is_v2, id.clone()).await,
 			ServerRouteResult::WsProxy(ws, path, udp) => {
@@ -244,6 +247,6 @@ fn handle_stream(stream: ServerRouteResult, id: String) {
 		if let Err(e) = res {
 			error!("error while handling client: {:?}", e);
 		}
-		CLIENTS.remove(&id)
+		CLIENTS.lock().await.remove(&id)
 	});
 }

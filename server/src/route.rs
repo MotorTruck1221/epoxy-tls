@@ -56,8 +56,8 @@ fn non_ws_resp() -> anyhow::Result<Response<Body>> {
 		.body(Body::new(CONFIG.server.non_ws_response.as_bytes().into()))?)
 }
 
-fn send_stats() -> anyhow::Result<Response<Body>> {
-	match generate_stats() {
+async fn send_stats() -> anyhow::Result<Response<Body>> {
+	match generate_stats().await {
 		Ok(x) => {
 			debug!("sent server stats to http client");
 			Ok(Response::builder()
@@ -99,7 +99,7 @@ where
 	if !is_upgrade {
 		if let Some(stats_endpoint) = stats_endpoint {
 			if req.uri().path() == stats_endpoint {
-				return send_stats();
+				return send_stats().await;
 			} else {
 				debug!("sent non_ws_response to http client");
 				return non_ws_resp();
@@ -159,7 +159,7 @@ where
 pub async fn route_stats(stream: ServerStream) -> anyhow::Result<()> {
 	let stream = TokioIo::new(stream);
 	Builder::new()
-		.serve_connection(stream, service_fn(move |_| async { send_stats() }))
+		.serve_connection(stream, service_fn(move |_| async { send_stats().await }))
 		.await?;
 	Ok(())
 }
