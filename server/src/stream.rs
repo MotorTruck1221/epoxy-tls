@@ -4,16 +4,18 @@ use std::{
 };
 
 use anyhow::Context;
+use base64::{prelude::BASE64_STANDARD, Engine};
 use bytes::BytesMut;
 use cfg_if::cfg_if;
 use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, WebSocketError};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
+use log::debug;
 use regex::RegexSet;
 use tokio::net::{TcpStream, UdpSocket};
-use wisp_mux::{ConnectPacket, StreamType};
+use wisp_mux::{ConnectPacket, MuxStream, StreamType};
 
-use crate::{CONFIG, RESOLVER};
+use crate::{route::WispStreamWrite, CONFIG, RESOLVER};
 
 fn match_addr(str: &str, allowed: &RegexSet, blocked: &RegexSet) -> bool {
 	blocked.is_match(str) && !allowed.is_match(str)
@@ -40,6 +42,9 @@ pub enum ClientStream {
 	Udp(UdpSocket),
 	#[cfg(feature = "twisp")]
 	Pty(tokio::process::Child, pty_process::Pty),
+	Wispnet(MuxStream<WispStreamWrite>, String),
+
+	NoResolvedAddrs,
 	Blocked,
 	Invalid,
 }
@@ -105,6 +110,7 @@ fn is_global(addr: &IpAddr) -> bool {
 
 pub enum ResolvedPacket {
 	Valid(ConnectPacket),
+	ValidWispnet(u32, ConnectPacket),
 	NoResolvedAddrs,
 	Blocked,
 	Invalid,
@@ -112,6 +118,20 @@ pub enum ResolvedPacket {
 
 impl ClientStream {
 	pub async fn resolve(packet: ConnectPacket) -> anyhow::Result<ResolvedPacket> {
+		if CONFIG.wisp.has_wispnet() && packet.destination_hostname.ends_with(".wisp") {
+			if let Some(wispnet_server) = packet.destination_hostname.split(".wisp").next() {
+				debug!("routing {:?} through wispnet", packet);
+				let decoded = BASE64_STANDARD
+					.decode(wispnet_server)
+					.context("failed to decode wispnet server")?;
+				let server_id = u32::from_str(
+					&String::from_utf8(decoded).context("wispnet server was not a string")?,
+				)
+				.context("failed to parse wispnet server from string")?;
+				return Ok(ResolvedPacket::ValidWispnet(server_id, packet));
+			}
+		}
+
 		cfg_if! {
 			if #[cfg(feature = "twisp")] {
 				if let StreamType::Unknown(ty) = packet.stream_type {

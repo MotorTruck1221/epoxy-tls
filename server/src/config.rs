@@ -123,6 +123,8 @@ pub enum ProtocolExtension {
 	Udp,
 	/// Wisp version 2 MOTD protocol extension.
 	Motd,
+	/// Unofficial Wispnet-like protocol extension.
+	Wispnet,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -366,6 +368,11 @@ impl Default for WispConfig {
 }
 
 impl WispConfig {
+	#[doc(hidden)]
+	pub fn has_wispnet(&self) -> bool {
+		self.extensions.contains(&ProtocolExtension::Wispnet)
+	}
+
 	#[doc(hidden)]
 	pub async fn to_opts(&self) -> anyhow::Result<(Option<WispV2Handshake>, Vec<u8>, u32)> {
 		if self.wisp_v2 {

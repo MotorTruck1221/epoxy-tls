@@ -723,6 +723,7 @@ dependencies = [
  "anyhow",
  "async-speed-limit",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "cfg-if",
  "clap",

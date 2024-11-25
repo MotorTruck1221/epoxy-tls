@@ -112,6 +112,7 @@ pub trait ProtocolExtension: std::fmt::Debug + Sync + Send + 'static {
 	/// Handle receiving a packet.
 	async fn handle_packet(
 		&mut self,
+		packet_type: u8,
 		packet: Bytes,
 		read: &mut DynWebSocketRead,
 		write: &dyn LockingWebSocketWrite,

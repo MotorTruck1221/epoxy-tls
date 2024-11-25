@@ -48,6 +48,7 @@ impl ProtocolExtension for UdpProtocolExtension {
 
 	async fn handle_packet(
 		&mut self,
+		_: u8,
 		_: Bytes,
 		_: &mut DynWebSocketRead,
 		_: &dyn LockingWebSocketWrite,

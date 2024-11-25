@@ -50,7 +50,7 @@ impl From<(ConnectPacket, ConnectPacket)> for StreamStats {
 
 #[derive(Serialize)]
 struct ClientStats {
-	wsproxy: bool,
+	client_type: String,
 	streams: HashMap<String, StreamStats>,
 }
 
@@ -81,7 +81,7 @@ pub async fn generate_stats() -> anyhow::Result<String> {
 		clients.insert(
 			client.0.to_string(),
 			ClientStats {
-				wsproxy: client.1 .1,
+				client_type: client.1 .1.clone(),
 				streams: client
 					.1
 					 .0

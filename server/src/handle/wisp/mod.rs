@@ -1,6 +1,7 @@
 #[cfg(feature = "twisp")]
 pub mod twisp;
 pub mod utils;
+pub mod wispnet;
 
 use std::{sync::Arc, time::Duration};
 
@@ -23,6 +24,7 @@ use wisp_mux::{
 	ws::Payload, CloseReason, ConnectPacket, MuxStream, MuxStreamAsyncRead, MuxStreamWrite,
 	ServerMux,
 };
+use wispnet::route_wispnet;
 
 use crate::{
 	route::{WispResult, WispStreamWrite},
@@ -100,8 +102,23 @@ async fn handle_stream(
 		let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
 		return;
 	};
-	let connect = match resolved {
-		ResolvedPacket::Valid(x) => x,
+	let (stream, resolved_stream) = match resolved {
+		ResolvedPacket::Valid(connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = ClientStream::connect(connect).await else {
+				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+				return;
+			};
+			(stream, resolved)
+		}
+		ResolvedPacket::ValidWispnet(server, connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = route_wispnet(server, connect).await else {
+				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+				return;
+			};
+			(stream, resolved)
+		}
 		ResolvedPacket::NoResolvedAddrs => {
 			let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
 			return;
@@ -118,13 +135,6 @@ async fn handle_stream(
 		}
 	};
 
-	let resolved_stream = connect.clone();
-
-	let Ok(stream) = ClientStream::connect(connect).await else {
-		let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
-		return;
-	};
-
 	let uuid = Uuid::new_v4();
 
 	debug!(
@@ -137,7 +147,7 @@ async fn handle_stream(
 			.0
 			.lock()
 			.await
-			.insert(uuid, (requested_stream, resolved_stream));
+			.insert(uuid, (requested_stream, resolved_stream.clone()));
 	}
 
 	let forward_fut = async {
@@ -212,6 +222,12 @@ async fn handle_stream(
 						let _ = closer.close(CloseReason::Unexpected).await;
 					}
 				}
+			}
+			ClientStream::Wispnet(stream, mux_id) => {
+				wispnet::handle_stream(muxstream, stream, mux_id, uuid, resolved_stream).await
+			}
+			ClientStream::NoResolvedAddrs => {
+				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
 			}
 			ClientStream::Invalid => {
 				let _ = muxstream.close(CloseReason::ServerStreamInvalidInfo).await;

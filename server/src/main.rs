@@ -1,13 +1,14 @@
 #![doc(html_no_source)]
 #![deny(clippy::todo)]
 #![allow(unexpected_cfgs)]
+#![warn(clippy::large_futures)]
 
 use std::{collections::HashMap, fs::read_to_string, net::IpAddr};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{validate_config_cache, Cli, Config, RuntimeFlavor};
-use handle::{handle_wisp, handle_wsproxy};
+use handle::{handle_wisp, handle_wsproxy, wisp::wispnet::handle_wispnet};
 use hickory_resolver::{
 	config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
 	system_conf::read_system_conf,
@@ -41,7 +42,7 @@ mod stream;
 mod util_chain;
 
 #[doc(hidden)]
-type Client = (Mutex<HashMap<Uuid, (ConnectPacket, ConnectPacket)>>, bool);
+type Client = (Mutex<HashMap<Uuid, (ConnectPacket, ConnectPacket)>>, String);
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -234,14 +235,18 @@ async fn async_main() -> Result<()> {
 #[doc(hidden)]
 fn handle_stream(stream: ServerRouteResult, id: String) {
 	tokio::spawn(async move {
-		CLIENTS
-			.lock()
-			.await
-			.insert(id.clone(), (Mutex::new(HashMap::new()), false));
+		CLIENTS.lock().await.insert(
+			id.clone(),
+			(Mutex::new(HashMap::new()), format!("{}", stream)),
+		);
 		let res = match stream {
-			ServerRouteResult::Wisp(stream, is_v2) => handle_wisp(stream, is_v2, id.clone()).await,
-			ServerRouteResult::WsProxy(ws, path, udp) => {
-				handle_wsproxy(ws, id.clone(), path, udp).await
+			ServerRouteResult::Wisp {
+				stream,
+				has_ws_protocol,
+			} => handle_wisp(stream, has_ws_protocol, id.clone()).await,
+			ServerRouteResult::Wispnet { stream } => handle_wispnet(stream, id.clone()).await,
+			ServerRouteResult::WsProxy { stream, path, udp } => {
+				handle_wsproxy(stream, id.clone(), path, udp).await
 			}
 		};
 		if let Err(e) = res {

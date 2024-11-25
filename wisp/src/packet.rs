@@ -572,6 +572,7 @@ impl<'a> Packet<'a> {
 				{
 					extension
 						.handle_packet(
+							packet_type,
 							BytesMut::from(bytes).freeze(),
 							DynWebSocketRead::from_mut(read),
 							write,

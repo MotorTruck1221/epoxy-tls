@@ -189,7 +189,7 @@ impl<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> MuxInner<R, W> {
 		let (ch_tx, ch_rx) = mpsc::bounded(if self.role == Role::Server {
 			self.buffer_size as usize
 		} else {
-			usize::MAX
+			usize::MAX - 8
 		});
 
 		let should_flow_control = self.tcp_extensions.contains(&stream_type.into());

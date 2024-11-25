@@ -36,15 +36,26 @@ pub type WispStreamWrite = EitherWebSocketWrite<
 pub type WispResult = (WispStreamRead, WispStreamWrite);
 
 pub enum ServerRouteResult {
-	Wisp(WispResult, bool),
-	WsProxy(WebSocketStreamWrapper, String, bool),
+	Wisp {
+		stream: WispResult,
+		has_ws_protocol: bool,
+	},
+	Wispnet {
+		stream: WispResult,
+	},
+	WsProxy {
+		stream: WebSocketStreamWrapper,
+		path: String,
+		udp: bool,
+	},
 }
 
 impl Display for ServerRouteResult {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Wisp(..) => write!(f, "Wisp"),
-			Self::WsProxy(_, path, udp) => write!(f, "WsProxy path {:?} udp {:?}", path, udp),
+			Self::Wisp { .. } => write!(f, "Wisp"),
+			Self::Wispnet { .. } => write!(f, "Wispnet"),
+			Self::WsProxy { path, udp, .. } => write!(f, "WsProxy path {:?} udp {:?}", path, udp),
 		}
 	}
 }
@@ -81,8 +92,14 @@ fn get_header(headers: &HeaderMap, header: &str) -> Option<String> {
 }
 
 enum HttpUpgradeResult {
-	Wisp(bool),
-	WsProxy(String, bool),
+	Wisp {
+		has_ws_protocol: bool,
+		is_wispnet: bool,
+	},
+	WsProxy {
+		path: String,
+		udp: bool,
+	},
 }
 
 async fn ws_upgrade<F, R>(
@@ -126,11 +143,19 @@ where
 	let ws_protocol = headers.get(SEC_WEBSOCKET_PROTOCOL);
 	let req_path = req.uri().path().to_string();
 
-	if req_path.starts_with(&(CONFIG.wisp.prefix.clone() + "/")) {
+	if req_path.ends_with(&(CONFIG.wisp.prefix.clone() + "/")) {
 		let has_ws_protocol = ws_protocol.is_some();
+		let is_wispnet = CONFIG.wisp.has_wispnet() && req.uri().query().unwrap_or_default() == "net";
 		tokio::spawn(async move {
-			if let Err(err) =
-				(callback)(fut, HttpUpgradeResult::Wisp(has_ws_protocol), ip_header).await
+			if let Err(err) = (callback)(
+				fut,
+				HttpUpgradeResult::Wisp {
+					has_ws_protocol,
+					is_wispnet,
+				},
+				ip_header,
+			)
+			.await
 			{
 				error!("error while serving client: {:?}", err);
 			}
@@ -140,10 +165,17 @@ where
 				.append(SEC_WEBSOCKET_PROTOCOL, protocol.clone());
 		}
 	} else if CONFIG.wisp.allow_wsproxy {
-		let udp = req.uri().query().unwrap_or_default() == "?udp";
+		let udp = req.uri().query().unwrap_or_default() == "udp";
 		tokio::spawn(async move {
-			if let Err(err) =
-				(callback)(fut, HttpUpgradeResult::WsProxy(req_path, udp), ip_header).await
+			if let Err(err) = (callback)(
+				fut,
+				HttpUpgradeResult::WsProxy {
+					path: req_path,
+					udp,
+				},
+				ip_header,
+			)
+			.await
 			{
 				error!("error while serving client: {:?}", err);
 			}
@@ -188,7 +220,10 @@ pub async fn route(
 								ws.set_auto_pong(false);
 
 								match res {
-									HttpUpgradeResult::Wisp(is_v2) => {
+									HttpUpgradeResult::Wisp {
+										has_ws_protocol,
+										is_wispnet,
+									} => {
 										let (read, write) = ws.split(|x| {
 											let parts = x
 												.into_inner()
@@ -198,21 +233,33 @@ pub async fn route(
 											(chain(Cursor::new(parts.read_buf), r), w)
 										});
 
-										(callback)(
-											ServerRouteResult::Wisp(
-												(
+										let result = if is_wispnet {
+											ServerRouteResult::Wispnet {
+												stream: (
 													EitherWebSocketRead::Left(read),
 													EitherWebSocketWrite::Left(write),
 												),
-												is_v2,
-											),
-											maybe_ip,
-										)
+											}
+										} else {
+											ServerRouteResult::Wisp {
+												stream: (
+													EitherWebSocketRead::Left(read),
+													EitherWebSocketWrite::Left(write),
+												),
+												has_ws_protocol,
+											}
+										};
+
+										(callback)(result, maybe_ip)
 									}
-									HttpUpgradeResult::WsProxy(path, udp) => {
+									HttpUpgradeResult::WsProxy { path, udp } => {
 										let ws = WebSocketStreamWrapper(FragmentCollector::new(ws));
 										(callback)(
-											ServerRouteResult::WsProxy(ws, path, udp),
+											ServerRouteResult::WsProxy {
+												stream: ws,
+												path,
+												udp,
+											},
 											maybe_ip,
 										);
 									}
@@ -237,13 +284,13 @@ pub async fn route(
 			let write = GenericWebSocketWrite::new(FramedWrite::new(write, codec));
 
 			(callback)(
-				ServerRouteResult::Wisp(
-					(
+				ServerRouteResult::Wisp {
+					stream: (
 						EitherWebSocketRead::Right(read),
 						EitherWebSocketWrite::Right(write),
 					),
-					true,
-				),
+					has_ws_protocol: true,
+				},
 				None,
 			);
 		}
