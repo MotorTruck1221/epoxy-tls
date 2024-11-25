@@ -46,7 +46,7 @@ async fn handshake<R: WebSocketRead + 'static, W: WebSocketWrite>(
 		if let PacketType::Info(info) = packet.packet_type {
 			let mut supported_extensions = get_supported_extensions(info.extensions, &mut builders);
 
-			for extension in supported_extensions.iter_mut() {
+			for extension in &mut supported_extensions {
 				extension
 					.handle_handshake(DynWebSocketRead::from_mut(rx), tx)
 					.await?;

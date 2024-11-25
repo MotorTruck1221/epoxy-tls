@@ -29,8 +29,8 @@ pub enum CertAuthError {
 impl std::fmt::Display for CertAuthError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Ed25519(x) => write!(f, "ED25519: {:?}", x),
-			Self::Getrandom(x) => write!(f, "getrandom: {:?}", x),
+			Self::Ed25519(x) => write!(f, "ED25519: {x:?}"),
+			Self::Getrandom(x) => write!(f, "getrandom: {x:?}"),
 		}
 	}
 }
@@ -57,7 +57,7 @@ bitflags::bitflags! {
 	#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 	pub struct SupportedCertificateTypes: u8 {
 		/// ED25519 certificate.
-		const Ed25519 = 0b00000001;
+		const Ed25519 = 0b0000_0001;
 	}
 }
 
@@ -160,7 +160,7 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 				required,
 			} => {
 				let mut out = BytesMut::with_capacity(2 + challenge.len());
-				out.put_u8(*required as u8);
+				out.put_u8(u8::from(*required));
 				out.put_u8(cert_types.bits());
 				out.extend_from_slice(challenge);
 				out.freeze()
@@ -176,8 +176,7 @@ impl ProtocolExtension for CertAuthProtocolExtension {
 				out.extend_from_slice(signature);
 				out.freeze()
 			}
-			Self::ClientRecieved => Bytes::new(),
-			Self::ServerVerified => Bytes::new(),
+			Self::ServerVerified | Self::ClientRecieved => Bytes::new(),
 		}
 	}
 
@@ -262,10 +261,10 @@ impl CertAuthProtocolExtensionBuilder {
 	/// sent the certificate authentication protocol extension.
 	pub fn is_required(&self) -> Option<bool> {
 		match self {
-			Self::ServerBeforeChallenge { required, .. } => Some(*required),
-			Self::ServerAfterChallenge { required, .. } => Some(*required),
+			Self::ServerBeforeChallenge { required, .. }
+			| Self::ServerAfterChallenge { required, .. }
+			| Self::ClientAfterChallenge { required, .. } => Some(*required),
 			Self::ClientBeforeChallenge { .. } => None,
-			Self::ClientAfterChallenge { required, .. } => Some(*required),
 		}
 	}
 
@@ -294,8 +293,6 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 		_: Role,
 	) -> Result<AnyProtocolExtension, WispError> {
 		match self {
-			// server should have already sent the challenge before recieving a response to parse
-			Self::ServerBeforeChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
 			Self::ServerAfterChallenge {
 				verifiers,
 				challenge,
@@ -332,8 +329,12 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 
 				Ok(CertAuthProtocolExtension::ClientRecieved.into())
 			}
-			// client has already recieved a challenge
-			Self::ClientAfterChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
+
+			// client has already recieved a challenge or
+			// server should have already sent the challenge before recieving a response to parse
+			Self::ClientAfterChallenge { .. } | Self::ServerBeforeChallenge { .. } => {
+				Err(WispError::ExtensionImplNotSupported)
+			}
 		}
 	}
 
@@ -352,7 +353,7 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 				let required = *required;
 
 				*self = Self::ServerAfterChallenge {
-					verifiers: verifiers.to_vec(),
+					verifiers: verifiers.clone(),
 					challenge: challenge.clone(),
 					required,
 				};
@@ -364,10 +365,6 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 				}
 				.into())
 			}
-			// server has already sent a challenge
-			Self::ServerAfterChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
-			// client needs to recieve a challenge
-			Self::ClientBeforeChallenge { .. } => Err(WispError::ExtensionImplNotSupported),
 			Self::ClientAfterChallenge {
 				signer,
 				challenge,
@@ -392,6 +389,12 @@ impl ProtocolExtensionBuilder for CertAuthProtocolExtensionBuilder {
 					signature: signature.clone(),
 				}
 				.into())
+			}
+
+			// server has already sent a challenge or
+			// client needs to recieve a challenge
+			Self::ClientBeforeChallenge { .. } | Self::ServerAfterChallenge { .. } => {
+				Err(WispError::ExtensionImplNotSupported)
 			}
 		}
 	}

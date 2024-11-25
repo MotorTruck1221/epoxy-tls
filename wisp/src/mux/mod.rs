@@ -52,7 +52,7 @@ async fn send_info_packet<W: WebSocketWrite>(
 		.await
 }
 
-fn validate_continue_packet(packet: Packet<'_>) -> Result<u32, WispError> {
+fn validate_continue_packet(packet: &Packet<'_>) -> Result<u32, WispError> {
 	if packet.stream_id != 0 {
 		return Err(WispError::InvalidStreamId);
 	}

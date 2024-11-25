@@ -492,9 +492,9 @@ impl<'a> Packet<'a> {
 				return Err(WispError::PacketTooSmall);
 			}
 			if let Some(builder) = extension_builders.iter_mut().find(|x| x.get_id() == id) {
-				extensions.push(builder.build_from_bytes(bytes.copy_to_bytes(length), role)?)
+				extensions.push(builder.build_from_bytes(bytes.copy_to_bytes(length), role)?);
 			} else {
-				bytes.advance(length)
+				bytes.advance(length);
 			}
 		}
 

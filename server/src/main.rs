@@ -1,7 +1,6 @@
 #![doc(html_no_source)]
 #![deny(clippy::todo)]
 #![allow(unexpected_cfgs)]
-#![warn(clippy::large_futures)]
 
 use std::{collections::HashMap, fs::read_to_string, net::IpAddr};
 

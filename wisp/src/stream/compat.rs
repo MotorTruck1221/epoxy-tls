@@ -205,7 +205,7 @@ impl AsyncBufRead for MuxStreamAsyncRW {
 	}
 
 	fn consume(self: Pin<&mut Self>, amt: usize) {
-		self.project().rx.consume(amt)
+		self.project().rx.consume(amt);
 	}
 }
 
@@ -270,7 +270,7 @@ impl AsyncBufRead for MuxStreamAsyncRead {
 		self.project().rx.poll_fill_buf(cx)
 	}
 	fn consume(self: Pin<&mut Self>, amt: usize) {
-		self.project().rx.consume(amt)
+		self.project().rx.consume(amt);
 	}
 }
 
@@ -319,7 +319,7 @@ impl AsyncWrite for MuxStreamAsyncWrite {
 					Poll::Ready(Err(err)) => {
 						self.error = Some(err);
 					}
-					Poll::Ready(Ok(_)) | Poll::Pending => {}
+					Poll::Ready(Ok(())) | Poll::Pending => {}
 				}
 
 				Poll::Ready(Ok(buf.len()))

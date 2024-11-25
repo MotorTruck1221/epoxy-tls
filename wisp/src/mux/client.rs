@@ -39,14 +39,14 @@ async fn handshake<R: WebSocketRead + 'static, W: WebSocketWrite>(
 
 		if let PacketType::Info(info) = packet.packet_type {
 			// v2 server
-			let buffer_size = validate_continue_packet(rx.wisp_read_frame(tx).await?.try_into()?)?;
+			let buffer_size = validate_continue_packet(&rx.wisp_read_frame(tx).await?.try_into()?)?;
 
 			(closure)(&mut builders).await?;
 			send_info_packet(tx, &mut builders).await?;
 
 			let mut supported_extensions = get_supported_extensions(info.extensions, &mut builders);
 
-			for extension in supported_extensions.iter_mut() {
+			for extension in &mut supported_extensions {
 				extension
 					.handle_handshake(DynWebSocketRead::from_mut(rx), tx)
 					.await?;
@@ -63,7 +63,7 @@ async fn handshake<R: WebSocketRead + 'static, W: WebSocketWrite>(
 			))
 		} else {
 			// downgrade to v1
-			let buffer_size = validate_continue_packet(packet)?;
+			let buffer_size = validate_continue_packet(&packet)?;
 
 			Ok((
 				WispHandshakeResult {
@@ -75,7 +75,7 @@ async fn handshake<R: WebSocketRead + 'static, W: WebSocketWrite>(
 		}
 	} else {
 		// user asked for a v1 client
-		let buffer_size = validate_continue_packet(rx.wisp_read_frame(tx).await?.try_into()?)?;
+		let buffer_size = validate_continue_packet(&rx.wisp_read_frame(tx).await?.try_into()?)?;
 
 		Ok((
 			WispHandshakeResult {

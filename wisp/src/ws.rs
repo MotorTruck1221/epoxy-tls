@@ -15,7 +15,7 @@ use futures::{lock::Mutex, TryFutureExt};
 pub enum Payload<'a> {
 	/// Borrowed payload. Currently used when writing data.
 	Borrowed(&'a [u8]),
-	/// BytesMut payload. Currently used when reading data.
+	/// `BytesMut` payload. Currently used when reading data.
 	Bytes(BytesMut),
 }
 
@@ -33,6 +33,7 @@ impl<'a> From<&'a [u8]> for Payload<'a> {
 
 impl Payload<'_> {
 	/// Turn a Payload<'a> into a Payload<'static> by copying the data.
+	#[must_use]
 	pub fn into_owned(self) -> Self {
 		match self {
 			Self::Bytes(x) => Self::Bytes(x),
@@ -54,7 +55,7 @@ impl Deref for Payload<'_> {
 	type Target = [u8];
 	fn deref(&self) -> &Self::Target {
 		match self {
-			Self::Bytes(x) => x.deref(),
+			Self::Bytes(x) => x,
 			Self::Borrowed(x) => x,
 		}
 	}
@@ -175,7 +176,7 @@ pub trait WebSocketRead: Send {
 
 // similar to what dynosaur does
 mod wsr_inner {
-	use std::{future::Future, pin::Pin};
+	use std::{future::Future, pin::Pin, ptr};
 
 	use crate::WispError;
 
@@ -187,7 +188,7 @@ mod wsr_inner {
 			tx: &'a dyn LockingWebSocketWrite,
 		) -> Pin<Box<dyn Future<Output = Result<Frame<'static>, WispError>> + Send + 'a>>;
 
-		#[allow(clippy::type_complexity)]
+		#[expect(clippy::type_complexity)]
 		fn wisp_read_split<'a>(
 			&'a mut self,
 			tx: &'a dyn LockingWebSocketWrite,
@@ -222,7 +223,7 @@ mod wsr_inner {
 		}
 	}
 
-	/// WebSocketRead trait object.
+	/// `WebSocketRead` trait object.
 	#[repr(transparent)]
 	pub struct DynWebSocketRead {
 		ptr: dyn ErasedWebSocketRead + 'static,
@@ -243,24 +244,26 @@ mod wsr_inner {
 		}
 	}
 	impl DynWebSocketRead {
-		/// Create a WebSocketRead trait object from a boxed WebSocketRead.
+		/// Create a `WebSocketRead` trait object from a boxed `WebSocketRead`.
 		pub fn new(val: Box<impl WebSocketRead + 'static>) -> Box<Self> {
 			let val: Box<dyn ErasedWebSocketRead + 'static> = val;
 			unsafe { std::mem::transmute(val) }
 		}
-		/// Create a WebSocketRead trait object from a WebSocketRead.
+		/// Create a `WebSocketRead` trait object from a `WebSocketRead`.
 		pub fn boxed(val: impl WebSocketRead + 'static) -> Box<Self> {
 			Self::new(Box::new(val))
 		}
-		/// Create a WebSocketRead trait object from a WebSocketRead reference.
+		/// Create a `WebSocketRead` trait object from a `WebSocketRead` reference.
 		pub fn from_ref(val: &(impl WebSocketRead + 'static)) -> &Self {
 			let val: &(dyn ErasedWebSocketRead + 'static) = val;
-			unsafe { std::mem::transmute(val) }
+			unsafe { &*(ptr::from_ref::<dyn ErasedWebSocketRead>(val) as *const DynWebSocketRead) }
 		}
-		/// Create a WebSocketRead trait object from a mutable WebSocketRead reference.
+		/// Create a `WebSocketRead` trait object from a mutable `WebSocketRead` reference.
 		pub fn from_mut(val: &mut (impl WebSocketRead + 'static)) -> &mut Self {
 			let val: &mut (dyn ErasedWebSocketRead + 'static) = &mut *val;
-			unsafe { std::mem::transmute(val) }
+			unsafe {
+				&mut *(ptr::from_mut::<dyn ErasedWebSocketRead>(val) as *mut DynWebSocketRead)
+			}
 		}
 	}
 }
@@ -294,7 +297,7 @@ pub trait WebSocketWrite: Send {
 
 // similar to what dynosaur does
 mod wsw_inner {
-	use std::{future::Future, pin::Pin};
+	use std::{future::Future, pin::Pin, ptr};
 
 	use crate::WispError;
 
@@ -340,7 +343,7 @@ mod wsw_inner {
 		}
 	}
 
-	/// WebSocketWrite trait object.
+	/// `WebSocketWrite` trait object.
 	#[repr(transparent)]
 	pub struct DynWebSocketWrite {
 		ptr: dyn ErasedWebSocketWrite + 'static,
@@ -363,24 +366,28 @@ mod wsw_inner {
 		}
 	}
 	impl DynWebSocketWrite {
-		/// Create a new WebSocketWrite trait object from a boxed WebSocketWrite.
+		/// Create a new `WebSocketWrite` trait object from a boxed `WebSocketWrite`.
 		pub fn new(val: Box<impl WebSocketWrite + 'static>) -> Box<Self> {
 			let val: Box<dyn ErasedWebSocketWrite + 'static> = val;
 			unsafe { std::mem::transmute(val) }
 		}
-		/// Create a new WebSocketWrite trait object from a WebSocketWrite.
+		/// Create a new `WebSocketWrite` trait object from a `WebSocketWrite`.
 		pub fn boxed(val: impl WebSocketWrite + 'static) -> Box<Self> {
 			Self::new(Box::new(val))
 		}
-		/// Create a new WebSocketWrite trait object from a WebSocketWrite reference.
+		/// Create a new `WebSocketWrite` trait object from a `WebSocketWrite` reference.
 		pub fn from_ref(val: &(impl WebSocketWrite + 'static)) -> &Self {
 			let val: &(dyn ErasedWebSocketWrite + 'static) = val;
-			unsafe { std::mem::transmute(val) }
+			unsafe {
+				&*(ptr::from_ref::<dyn ErasedWebSocketWrite>(val) as *const DynWebSocketWrite)
+			}
 		}
-		/// Create a new WebSocketWrite trait object from a mutable WebSocketWrite reference.
+		/// Create a new `WebSocketWrite` trait object from a mutable `WebSocketWrite` reference.
 		pub fn from_mut(val: &mut (impl WebSocketWrite + 'static)) -> &mut Self {
 			let val: &mut (dyn ErasedWebSocketWrite + 'static) = &mut *val;
-			unsafe { std::mem::transmute(val) }
+			unsafe {
+				&mut *(ptr::from_mut::<dyn ErasedWebSocketWrite>(val) as *mut DynWebSocketWrite)
+			}
 		}
 	}
 }
@@ -390,7 +397,7 @@ mod private {
 	pub trait Sealed {}
 }
 
-/// Helper trait object for LockedWebSocketWrite.
+/// Helper trait object for `LockedWebSocketWrite`.
 pub trait LockingWebSocketWrite: private::Sealed + Sync {
 	/// Write a frame to the websocket.
 	fn wisp_write_frame<'a>(
@@ -471,11 +478,11 @@ impl<T: WebSocketWrite> LockingWebSocketWrite for LockedWebSocketWrite<T> {
 	}
 }
 
-/// Combines two different WebSocketReads together.
+/// Combines two different `WebSocketRead`s together.
 pub enum EitherWebSocketRead<A: WebSocketRead, B: WebSocketRead> {
-	/// First WebSocketRead variant.
+	/// First `WebSocketRead` variant.
 	Left(A),
-	/// Second WebSocketRead variant.
+	/// Second `WebSocketRead` variant.
 	Right(B),
 }
 impl<A: WebSocketRead, B: WebSocketRead> WebSocketRead for EitherWebSocketRead<A, B> {
@@ -500,11 +507,11 @@ impl<A: WebSocketRead, B: WebSocketRead> WebSocketRead for EitherWebSocketRead<A
 	}
 }
 
-/// Combines two different WebSocketWrites together.
+/// Combines two different `WebSocketWrite`s together.
 pub enum EitherWebSocketWrite<A: WebSocketWrite, B: WebSocketWrite> {
-	/// First WebSocketWrite variant.
+	/// First `WebSocketWrite` variant.
 	Left(A),
-	/// Second WebSocketWrite variant.
+	/// Second `WebSocketWrite` variant.
 	Right(B),
 }
 impl<A: WebSocketWrite, B: WebSocketWrite> WebSocketWrite for EitherWebSocketWrite<A, B> {

@@ -8,6 +8,7 @@ pub mod udp;
 use std::{
 	any::TypeId,
 	ops::{Deref, DerefMut},
+	ptr,
 };
 
 use async_trait::async_trait;
@@ -47,13 +48,13 @@ impl AnyProtocolExtension {
 impl Deref for AnyProtocolExtension {
 	type Target = dyn ProtocolExtension;
 	fn deref(&self) -> &Self::Target {
-		self.0.deref()
+		&*self.0
 	}
 }
 
 impl DerefMut for AnyProtocolExtension {
 	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.0.deref_mut()
+		&mut *self.0
 	}
 }
 
@@ -137,7 +138,7 @@ impl dyn ProtocolExtension {
 		if self.__is::<T>() {
 			unsafe {
 				let raw: *mut dyn ProtocolExtension = Box::into_raw(self);
-				Ok(Box::from_raw(raw as *mut T))
+				Ok(Box::from_raw(raw.cast::<T>()))
 			}
 		} else {
 			Err(self)
@@ -146,7 +147,7 @@ impl dyn ProtocolExtension {
 
 	fn __downcast_ref<T: ProtocolExtension>(&self) -> Option<&T> {
 		if self.__is::<T>() {
-			unsafe { Some(&*(self as *const dyn ProtocolExtension as *const T)) }
+			unsafe { Some(&*ptr::from_ref::<dyn ProtocolExtension>(self).cast::<T>()) }
 		} else {
 			None
 		}
@@ -154,7 +155,7 @@ impl dyn ProtocolExtension {
 
 	fn __downcast_mut<T: ProtocolExtension>(&mut self) -> Option<&mut T> {
 		if self.__is::<T>() {
-			unsafe { Some(&mut *(self as *mut dyn ProtocolExtension as *mut T)) }
+			unsafe { Some(&mut *ptr::from_mut::<dyn ProtocolExtension>(self).cast::<T>()) }
 		} else {
 			None
 		}
@@ -198,7 +199,7 @@ impl dyn ProtocolExtensionBuilder {
 		if self.__is::<T>() {
 			unsafe {
 				let raw: *mut dyn ProtocolExtensionBuilder = Box::into_raw(self);
-				Ok(Box::from_raw(raw as *mut T))
+				Ok(Box::from_raw(raw.cast::<T>()))
 			}
 		} else {
 			Err(self)
@@ -207,7 +208,7 @@ impl dyn ProtocolExtensionBuilder {
 
 	fn __downcast_ref<T: ProtocolExtensionBuilder>(&self) -> Option<&T> {
 		if self.__is::<T>() {
-			unsafe { Some(&*(self as *const dyn ProtocolExtensionBuilder as *const T)) }
+			unsafe { Some(&*ptr::from_ref::<dyn ProtocolExtensionBuilder>(self).cast::<T>()) }
 		} else {
 			None
 		}
@@ -215,7 +216,7 @@ impl dyn ProtocolExtensionBuilder {
 
 	fn __downcast_mut<T: ProtocolExtensionBuilder>(&mut self) -> Option<&mut T> {
 		if self.__is::<T>() {
-			unsafe { Some(&mut *(self as *mut dyn ProtocolExtensionBuilder as *mut T)) }
+			unsafe { Some(&mut *ptr::from_mut::<dyn ProtocolExtensionBuilder>(self).cast::<T>()) }
 		} else {
 			None
 		}
@@ -250,13 +251,13 @@ impl AnyProtocolExtensionBuilder {
 impl Deref for AnyProtocolExtensionBuilder {
 	type Target = dyn ProtocolExtensionBuilder;
 	fn deref(&self) -> &Self::Target {
-		self.0.deref()
+		&*self.0
 	}
 }
 
 impl DerefMut for AnyProtocolExtensionBuilder {
 	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.0.deref_mut()
+		&mut *self.0
 	}
 }
 

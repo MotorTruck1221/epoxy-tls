@@ -76,11 +76,9 @@ impl ProtocolExtension for PasswordProtocolExtension {
 		match self {
 			Self::ServerBeforeClientInfo { required } => {
 				let mut out = BytesMut::with_capacity(1);
-				out.put_u8(*required as u8);
+				out.put_u8(u8::from(*required));
 				out.freeze()
 			}
-			Self::ServerAfterClientInfo { .. } => Bytes::new(),
-			Self::ClientBeforeServerInfo => Bytes::new(),
 			Self::ClientAfterServerInfo { user, password } => {
 				let mut out = BytesMut::with_capacity(1 + 2 + user.len() + password.len());
 				out.put_u8(user.len().try_into().unwrap());
@@ -89,6 +87,8 @@ impl ProtocolExtension for PasswordProtocolExtension {
 				out.extend_from_slice(password.as_bytes());
 				out.freeze()
 			}
+
+			Self::ServerAfterClientInfo { .. } | Self::ClientBeforeServerInfo => Bytes::new(),
 		}
 	}
 
@@ -164,10 +164,10 @@ impl PasswordProtocolExtensionBuilder {
 	/// sent the password protocol extension.
 	pub fn is_required(&self) -> Option<bool> {
 		match self {
-			Self::ServerBeforeClientInfo { required, .. } => Some(*required),
-			Self::ServerAfterClientInfo { required, .. } => Some(*required),
+			Self::ServerBeforeClientInfo { required, .. }
+			| Self::ServerAfterClientInfo { required, .. }
+			| Self::ClientAfterServerInfo { required, .. } => Some(*required),
 			Self::ClientBeforeServerInfo { .. } => None,
-			Self::ClientAfterServerInfo { required, .. } => Some(*required),
 		}
 	}
 
@@ -195,8 +195,9 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 				}
 				.into())
 			}
-			Self::ServerAfterClientInfo { .. } => Err(WispError::ExtensionImplNotSupported),
-			Self::ClientBeforeServerInfo { .. } => Err(WispError::ExtensionImplNotSupported),
+			Self::ServerAfterClientInfo { .. } | Self::ClientBeforeServerInfo { .. } => {
+				Err(WispError::ExtensionImplNotSupported)
+			}
 			Self::ClientAfterServerInfo { creds, .. } => {
 				let (user, password) = creds.clone().ok_or(WispError::PasswordExtensionNoCreds)?;
 				Ok(PasswordProtocolExtension::ClientAfterServerInfo { user, password }.into())
@@ -218,24 +219,23 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 				let password =
 					std::str::from_utf8(&bytes.split_to(password_len as usize))?.to_string();
 
-				let valid = users.get(&user).map(|x| *x == password).unwrap_or(false);
+				let valid = users.get(&user).is_some_and(|x| *x == password);
 
 				*self = Self::ServerAfterClientInfo {
 					users: users.clone(),
 					required: *required,
 				};
 
-				if !valid {
-					Err(WispError::PasswordExtensionCredsInvalid)
-				} else {
+				if valid {
 					Ok(PasswordProtocolExtension::ServerAfterClientInfo {
 						chosen_user: user,
 						chosen_password: password,
 					}
 					.into())
+				} else {
+					Err(WispError::PasswordExtensionCredsInvalid)
 				}
 			}
-			Self::ServerAfterClientInfo { .. } => Err(WispError::ExtensionImplNotSupported),
 			Self::ClientBeforeServerInfo { creds } => {
 				let required = bytes.get_u8() != 0;
 
@@ -246,7 +246,9 @@ impl ProtocolExtensionBuilder for PasswordProtocolExtensionBuilder {
 
 				Ok(PasswordProtocolExtension::ClientBeforeServerInfo.into())
 			}
-			Self::ClientAfterServerInfo { .. } => Err(WispError::ExtensionImplNotSupported),
+			Self::ClientAfterServerInfo { .. } | Self::ServerAfterClientInfo { .. } => {
+				Err(WispError::ExtensionImplNotSupported)
+			}
 		}
 	}
 }

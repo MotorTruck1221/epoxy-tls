@@ -50,7 +50,7 @@ impl<W: WebSocketWrite + 'static> MuxStreamRead<W> {
 		}
 		let bytes = select! {
 			x = self.rx.recv_async() => x.map_err(|_| WispError::MuxMessageFailedToRecv)?,
-			_ = self.is_closed_event.listen().fuse() => return Ok(None)
+			() = self.is_closed_event.listen().fuse() => return Ok(None)
 		};
 		if self.role == Role::Server && self.should_flow_control {
 			let val = self.flow_control_read.fetch_add(1, Ordering::AcqRel) + 1;
@@ -288,11 +288,14 @@ impl<W: WebSocketWrite + 'static> MuxStream<W> {
 				stream_id,
 				stream_type,
 				role,
+
 				tx: tx.clone(),
 				rx,
+
 				is_closed: is_closed.clone(),
-				is_closed_event: is_closed_event.clone(),
+				is_closed_event,
 				close_reason: close_reason.clone(),
+
 				should_flow_control,
 				flow_control: flow_control.clone(),
 				flow_control_read: AtomicU32::new(0),
@@ -302,13 +305,16 @@ impl<W: WebSocketWrite + 'static> MuxStream<W> {
 				stream_id,
 				stream_type,
 				role,
+
 				mux_tx,
 				tx,
-				is_closed: is_closed.clone(),
-				close_reason: close_reason.clone(),
+
+				is_closed,
+				close_reason,
+
+				continue_recieved,
 				should_flow_control,
-				flow_control: flow_control.clone(),
-				continue_recieved: continue_recieved.clone(),
+				flow_control,
 			},
 		}
 	}

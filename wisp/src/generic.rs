@@ -1,4 +1,4 @@
-//! WebSocketRead + WebSocketWrite implementation for generic `Stream + Sink`s.
+//! `WebSocketRead` and `WebSocketWrite` implementation for generic `Stream`s and `Sink`s.
 
 use bytes::{Bytes, BytesMut};
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -9,7 +9,7 @@ use crate::{
 	WispError,
 };
 
-/// WebSocketRead implementation for generic `Stream`s.
+/// `WebSocketRead` implementation for generic `Stream`s.
 pub struct GenericWebSocketRead<
 	T: Stream<Item = Result<BytesMut, E>> + Send + Unpin,
 	E: Error + Sync + Send + 'static,
@@ -18,12 +18,12 @@ pub struct GenericWebSocketRead<
 impl<T: Stream<Item = Result<BytesMut, E>> + Send + Unpin, E: Error + Sync + Send + 'static>
 	GenericWebSocketRead<T, E>
 {
-	/// Create a new wrapper WebSocketRead implementation.
+	/// Create a new wrapper `WebSocketRead` implementation.
 	pub fn new(stream: T) -> Self {
 		Self(stream)
 	}
 
-	/// Get the inner Stream from the wrapper.
+	/// Get the inner `Stream` from the wrapper.
 	pub fn into_inner(self) -> T {
 		self.0
 	}
@@ -45,7 +45,7 @@ impl<T: Stream<Item = Result<BytesMut, E>> + Send + Unpin, E: Error + Sync + Sen
 	}
 }
 
-/// WebSocketWrite implementation for generic `Sink`s.
+/// `WebSocketWrite` implementation for generic `Sink`s.
 pub struct GenericWebSocketWrite<
 	T: Sink<Bytes, Error = E> + Send + Unpin,
 	E: Error + Sync + Send + 'static,
@@ -54,12 +54,12 @@ pub struct GenericWebSocketWrite<
 impl<T: Sink<Bytes, Error = E> + Send + Unpin, E: Error + Sync + Send + 'static>
 	GenericWebSocketWrite<T, E>
 {
-	/// Create a new wrapper WebSocketWrite implementation.
+	/// Create a new wrapper `WebSocketWrite` implementation.
 	pub fn new(stream: T) -> Self {
 		Self(stream)
 	}
 
-	/// Get the inner Sink from the wrapper.
+	/// Get the inner `Sink` from the wrapper.
 	pub fn into_inner(self) -> T {
 		self.0
 	}
