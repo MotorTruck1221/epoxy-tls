@@ -224,7 +224,18 @@ async fn handle_stream(
 				}
 			}
 			ClientStream::Wispnet(stream, mux_id) => {
-				wispnet::handle_stream(muxstream, stream, mux_id, uuid, resolved_stream).await
+				wispnet::handle_stream(
+					muxstream,
+					stream,
+					mux_id,
+					uuid,
+					resolved_stream,
+					#[cfg(feature = "speed-limit")]
+					read_limit,
+					#[cfg(feature = "speed-limit")]
+					write_limit,
+				)
+				.await;
 			}
 			ClientStream::NoResolvedAddrs => {
 				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;

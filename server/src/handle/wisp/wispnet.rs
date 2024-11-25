@@ -179,6 +179,12 @@ pub async fn handle_stream(
 	mux_id: String,
 	uuid: Uuid,
 	resolved_stream: ConnectPacket,
+	#[cfg(feature = "speed-limit")] read_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
+	#[cfg(feature = "speed-limit")] write_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
 ) {
 	if let Some(client) = CLIENTS.lock().await.get(&mux_id) {
 		client

@@ -727,7 +727,6 @@ dependencies = [
  "bytes",
  "cfg-if",
  "clap",
- "console-subscriber",
  "ed25519-dalek",
  "env_logger",
  "event-listener",

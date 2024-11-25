@@ -14,7 +14,7 @@ use wisp_mux::{
 		AnyProtocolExtension, AnyProtocolExtensionBuilder, ProtocolExtension,
 		ProtocolExtensionBuilder,
 	},
-	ws::{LockedWebSocketWrite, WebSocketRead},
+	ws::{DynWebSocketRead, LockingWebSocketWrite},
 	MuxStreamAsyncRead, MuxStreamAsyncWrite, WispError,
 };
 
@@ -50,27 +50,30 @@ impl ProtocolExtension for TWispServerProtocolExtension {
 
 	async fn handle_handshake(
 		&mut self,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> std::result::Result<(), WispError> {
 		Ok(())
 	}
 
 	async fn handle_packet(
 		&mut self,
+		packet_type: u8,
 		mut packet: Bytes,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> std::result::Result<(), WispError> {
-		if packet.remaining() < 4 + 2 + 2 {
-			return Err(WispError::PacketTooSmall);
-		}
-		let stream_id = packet.get_u32_le();
-		let row = packet.get_u16_le();
-		let col = packet.get_u16_le();
+		if packet_type == 0xF0 {
+			if packet.remaining() < 4 + 2 + 2 {
+				return Err(WispError::PacketTooSmall);
+			}
+			let stream_id = packet.get_u32_le();
+			let row = packet.get_u16_le();
+			let col = packet.get_u16_le();
 
-		if let Some(pty) = self.0.lock().await.get(&stream_id) {
-			let _ = set_term_size(*pty, Size::new(row, col));
+			if let Some(pty) = self.0.lock().await.get(&stream_id) {
+				let _ = set_term_size(*pty, Size::new(row, col));
+			}
 		}
 		Ok(())
 	}
