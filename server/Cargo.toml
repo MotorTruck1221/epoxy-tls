@@ -10,6 +10,7 @@ async-trait = { version = "0.1.81", optional = true }
 bytes = "1.7.1"
 cfg-if = "1.0.0"
 clap = { version = "4.5.16", features = ["cargo", "derive"] }
+console-subscriber = { version = "0.4.1", optional = true }
 dashmap = "6.0.1"
 ed25519-dalek = { version = "2.1.1", features = ["pem"] }
 env_logger = "0.11.5"
@@ -50,6 +51,7 @@ toml = ["dep:toml"]
 
 twisp = ["dep:pty-process", "dep:libc", "dep:async-trait", "dep:shell-words"]
 speed-limit = ["dep:async-speed-limit"]
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 
 [build-dependencies]
 vergen-git2 = { version = "1.0.0", features = ["rustc"] }

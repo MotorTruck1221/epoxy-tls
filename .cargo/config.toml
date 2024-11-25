@@ -1,5 +1,0 @@
-[build]
-rustflags = ["--cfg", "tokio_unstable"]
-
-[target.wasm32-unknown-unknown]
-runner = "wasm-bindgen-test-runner"

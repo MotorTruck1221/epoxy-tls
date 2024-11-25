@@ -121,6 +121,10 @@ async fn get_cert(path: PathBuf) -> Result<SigningKey, Box<dyn Error + Sync + Se
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+	tokio::spawn(real_main()).await?
+}
+
+async fn real_main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	#[cfg(feature = "tokio-console")]
 	console_subscriber::init();
 	let opts = Cli::parse();

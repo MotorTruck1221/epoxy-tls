@@ -4,7 +4,7 @@
 
 use std::{fs::read_to_string, net::IpAddr};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use clap::Parser;
 use config::{validate_config_cache, Cli, Config, RuntimeFlavor};
 use dashmap::DashMap;
@@ -114,7 +114,7 @@ lazy_static! {
 static JEMALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[doc(hidden)]
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
 	if CLI.default_config {
 		println!("{}", Config::default().ser()?);
 		return Ok(());
@@ -135,88 +135,100 @@ fn main() -> anyhow::Result<()> {
 	builder.enable_all();
 	let rt = builder.build()?;
 
-	rt.block_on(async {
-		validate_config_cache().await;
+	rt.block_on(async move {
+		tokio::spawn(async_main()).await??;
+		Ok(())
+	})
+}
 
-		info!(
-			"listening on {:?} with runtime flavor {:?} and socket transport {:?}",
-			CONFIG.server.bind, CONFIG.server.runtime, CONFIG.server.transport
-		);
+#[doc(hidden)]
+async fn async_main() -> Result<()> {
+	#[cfg(feature = "tokio-console")]
+	console_subscriber::init();
 
-		trace!("CLI: {:#?}", &*CLI);
-		trace!("CONFIG: {:#?}", &*CONFIG);
-		trace!("RESOLVER: {:?}", &*RESOLVER);
+	validate_config_cache().await;
 
-		tokio::spawn(async {
-			let mut sig = signal(SignalKind::user_defined1()).unwrap();
-			while sig.recv().await.is_some() {
-				match generate_stats() {
-					Ok(stats) => info!("Stats:\n{}", stats),
-					Err(err) => error!("error while creating stats {:?}", err),
-				}
+	info!(
+		"listening on {:?} with runtime flavor {:?} and socket transport {:?}",
+		CONFIG.server.bind, CONFIG.server.runtime, CONFIG.server.transport
+	);
+
+	trace!("CLI: {:#?}", &*CLI);
+	trace!("CONFIG: {:#?}", &*CONFIG);
+	trace!("RESOLVER: {:?}", &*RESOLVER);
+
+	tokio::spawn(async {
+		let mut sig = signal(SignalKind::user_defined1()).unwrap();
+		while sig.recv().await.is_some() {
+			match generate_stats() {
+				Ok(stats) => info!("Stats:\n{}", stats),
+				Err(err) => error!("error while creating stats {:?}", err),
 			}
-		});
+		}
+	});
 
-		let mut listener = ServerListener::new(&CONFIG.server.bind)
-			.await
-			.with_context(|| format!("failed to bind to address {}", CONFIG.server.bind.1))?;
+	let mut listener = ServerListener::new(&CONFIG.server.bind)
+		.await
+		.with_context(|| format!("failed to bind to address {}", CONFIG.server.bind.1))?;
 
-		if let Some(bind_addr) = CONFIG
-			.server
-			.stats_endpoint
-			.as_ref()
-			.and_then(|x| x.get_bindaddr())
-		{
-			info!("stats server listening on {:?}", bind_addr);
-			let mut stats_listener = ServerListener::new(&bind_addr).await.with_context(|| {
-				format!("failed to bind to address {} for stats server", bind_addr.1)
-			})?;
+	if let Some(bind_addr) = CONFIG
+		.server
+		.stats_endpoint
+		.as_ref()
+		.and_then(|x| x.get_bindaddr())
+	{
+		info!("stats server listening on {:?}", bind_addr);
+		let mut stats_listener = ServerListener::new(&bind_addr).await.with_context(|| {
+			format!("failed to bind to address {} for stats server", bind_addr.1)
+		})?;
 
-			tokio::spawn(async move {
-				loop {
-					match stats_listener.accept().await {
-						Ok((stream, _)) => {
+		tokio::spawn(async move {
+			loop {
+				match stats_listener.accept().await {
+					Ok((stream, _)) => {
+						tokio::spawn(async move {
 							if let Err(e) = route_stats(stream).await {
 								error!("error while routing stats client: {:?}", e);
 							}
-						}
-						Err(e) => error!("error while accepting stats client: {:?}", e),
+						});
 					}
+					Err(e) => error!("error while accepting stats client: {:?}", e),
 				}
-			});
-		}
-
-		let stats_endpoint = CONFIG
-			.server
-			.stats_endpoint
-			.as_ref()
-			.and_then(|x| x.get_endpoint());
-		loop {
-			let stats_endpoint = stats_endpoint.clone();
-			match listener.accept().await {
-				Ok((stream, client_id)) => {
-					tokio::spawn(async move {
-						let res = route::route(stream, stats_endpoint, move |stream, maybe_ip| {
-							let client_id = if let Some(ip) = maybe_ip {
-								format!("{} ({})", client_id, ip)
-							} else {
-								client_id
-							};
-
-							trace!("routed {:?}: {}", client_id, stream);
-							handle_stream(stream, client_id)
-						})
-						.await;
-
-						if let Err(e) = res {
-							error!("error while routing client: {:?}", e);
-						}
-					});
-				}
-				Err(e) => error!("error while accepting client: {:?}", e),
 			}
+		});
+	}
+
+	let stats_endpoint = CONFIG
+		.server
+		.stats_endpoint
+		.as_ref()
+		.and_then(|x| x.get_endpoint());
+
+	loop {
+		let stats_endpoint = stats_endpoint.clone();
+		match listener.accept().await {
+			Ok((stream, client_id)) => {
+				tokio::spawn(async move {
+					let res = route::route(stream, stats_endpoint, move |stream, maybe_ip| {
+						let client_id = if let Some(ip) = maybe_ip {
+							format!("{} ({})", client_id, ip)
+						} else {
+							client_id
+						};
+
+						trace!("routed {:?}: {}", client_id, stream);
+						handle_stream(stream, client_id)
+					})
+					.await;
+
+					if let Err(e) = res {
+						error!("error while routing client: {:?}", e);
+					}
+				});
+			}
+			Err(e) => error!("error while accepting client: {:?}", e),
 		}
-	})
+	}
 }
 
 #[doc(hidden)]

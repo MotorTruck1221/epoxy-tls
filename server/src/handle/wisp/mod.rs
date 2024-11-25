@@ -290,9 +290,7 @@ pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow:
 	let event: Arc<Event> = Event::new().into();
 
 	let mux_id = id.clone();
-	set.spawn(tokio::task::unconstrained(fut.map(move |x| {
-		debug!("wisp client id {:?} multiplexor result {:?}", mux_id, x)
-	})));
+	set.spawn(fut.map(move |x| debug!("wisp client id {:?} multiplexor result {:?}", mux_id, x)));
 
 	let ping_mux = mux.clone();
 	let ping_event = event.clone();
