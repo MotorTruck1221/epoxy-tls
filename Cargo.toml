@@ -12,3 +12,10 @@ opt-level = 3
 [patch.crates-io]
 fastwebsockets = { git = "https://github.com/r58Playz/fastwebsockets" }
 h2 = { git = "https://github.com/r58Playz/h2-wasm" }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+struct_excessive_bools = "allow"

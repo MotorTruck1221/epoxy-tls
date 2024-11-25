@@ -131,7 +131,8 @@ pub fn poll_read_buf<T: AsyncRead + ?Sized, B: BufMut>(
 	let n = {
 		let dst = buf.chunk_mut();
 
-		let dst = unsafe { std::mem::transmute::<&mut UninitSlice, &mut [u8]>(dst) };
+		let dst =
+			unsafe { &mut *(std::ptr::from_mut::<UninitSlice>(dst) as *mut [u8]) };
 		ready!(io.poll_read(cx, dst)?)
 	};
 
@@ -147,9 +148,8 @@ impl<R: AsyncRead> Stream for ReaderStream<R> {
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		let mut this = self.as_mut().project();
 
-		let reader = match this.reader.as_pin_mut() {
-			Some(r) => r,
-			None => return Poll::Ready(None),
+		let Some(reader) = this.reader.as_pin_mut() else {
+			return Poll::Ready(None);
 		};
 
 		if this.buf.capacity() == 0 {

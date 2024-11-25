@@ -81,9 +81,7 @@ impl StreamProvider {
 		let mut client_config = if options.disable_certificate_validation {
 			client_config
 				.dangerous()
-				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(
-					provider,
-				)))
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider)))
 		} else {
 			cfg_if! {
 				if #[cfg(feature = "full")] {
@@ -97,9 +95,9 @@ impl StreamProvider {
 						})
 						.collect();
 					let pems = pems.map_err(EpoxyError::Pemfile)??;
-					let certstore = RootCertStore::from_iter(pems.into_iter().chain(TLS_SERVER_ROOTS.iter().cloned()));
+					let certstore: RootCertStore = pems.into_iter().chain(TLS_SERVER_ROOTS.iter().cloned()).collect();
 				} else {
-					let certstore = RootCertStore::from_iter(TLS_SERVER_ROOTS.iter().cloned());
+					let certstore: RootCertStore = TLS_SERVER_ROOTS.iter().cloned().collect();
 				}
 			}
 			client_config.with_root_certificates(certstore)
@@ -149,7 +147,7 @@ impl StreamProvider {
 		let current_client = self.current_client.clone();
 		spawn_local(async move {
 			match fut.await {
-				Ok(_) => console_log!("epoxy: wisp multiplexor task ended successfully"),
+				Ok(()) => console_log!("epoxy: wisp multiplexor task ended successfully"),
 				Err(x) => console_error!(
 					"epoxy: wisp multiplexor task ended with an error: {} {:?}",
 					x,
@@ -220,8 +218,7 @@ impl StreamProvider {
 					.get_ref()
 					.1
 					.alpn_protocol()
-					.map(|x| x == "h2".as_bytes())
-					.unwrap_or(false);
+					.is_some_and(|x| x == "h2".as_bytes());
 				Ok(IgnoreCloseNotify {
 					inner: stream.into(),
 					h2_negotiated,
@@ -253,7 +250,9 @@ impl hyper::rt::Read for HyperIo {
 		cx: &mut std::task::Context<'_>,
 		mut buf: hyper::rt::ReadBufCursor<'_>,
 	) -> Poll<Result<(), std::io::Error>> {
-		let buf_slice: &mut [u8] = unsafe { std::mem::transmute(buf.as_mut()) };
+		let buf_slice: &mut [u8] = unsafe {
+			&mut *(std::ptr::from_mut::<[std::mem::MaybeUninit<u8>]>(buf.as_mut()) as *mut [u8])
+		};
 		match self.project().inner.poll_read(cx, buf_slice) {
 			Poll::Ready(bytes_read) => {
 				let bytes_read = bytes_read?;
@@ -327,11 +326,14 @@ impl ConnectSvc for StreamProviderService {
 		Box::pin(async move {
 			let scheme = req.scheme_str().ok_or(EpoxyError::InvalidUrlScheme(None))?;
 			let host = req.host().ok_or(EpoxyError::NoUrlHost)?.to_string();
-			let port = req.port_u16().map(Ok).unwrap_or_else(|| match scheme {
-				"https" | "wss" => Ok(443),
-				"http" | "ws" => Ok(80),
-				_ => Err(EpoxyError::NoUrlPort),
-			})?;
+			let port = req.port_u16().map_or_else(
+				|| match scheme {
+					"https" | "wss" => Ok(443),
+					"http" | "ws" => Ok(80),
+					_ => Err(EpoxyError::NoUrlPort),
+				},
+				Ok,
+			)?;
 			Ok(HyperIo {
 				inner: match scheme {
 					"https" => Either::Left(provider.get_tls_stream(host, port, true).await?),

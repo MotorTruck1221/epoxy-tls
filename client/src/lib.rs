@@ -1,4 +1,5 @@
 #![feature(let_chains, impl_trait_in_assoc_type)]
+
 use std::{error::Error, pin::Pin, str::FromStr, sync::Arc};
 
 #[cfg(feature = "full")]
@@ -89,7 +90,7 @@ impl TryFrom<EpoxyUrlInput> for Uri {
 		} else if let Some(value) = value.as_string() {
 			value.try_into().map_err(EpoxyError::from)
 		} else {
-			Err(EpoxyError::InvalidUrl(format!("{:?}", value)))
+			Err(EpoxyError::InvalidUrl(format!("{value:?}")))
 		}
 	}
 }
@@ -176,11 +177,12 @@ pub enum EpoxyError {
 }
 
 impl EpoxyError {
+	#[expect(clippy::needless_pass_by_value)]
 	pub fn wisp_transport(value: JsValue) -> Self {
 		if let Some(err) = value.dyn_ref::<js_sys::Error>() {
 			Self::WispTransport(err.to_string().into())
 		} else {
-			Self::WispTransport(format!("{:?}", value))
+			Self::WispTransport(format!("{value:?}"))
 		}
 	}
 }
@@ -349,7 +351,7 @@ fn create_wisp_transport(function: Function) -> ProviderWispTransportGenerator {
 					.map(|x| {
 						let pkt = x.map_err(EpoxyError::wisp_transport)?;
 						let arr: ArrayBuffer = pkt.dyn_into().map_err(|x| {
-							EpoxyError::InvalidWispTransportPacket(format!("{:?}", x))
+							EpoxyError::InvalidWispTransportPacket(format!("{x:?}"))
 						})?;
 						Ok::<BytesMut, EpoxyError>(BytesMut::from(
 							Uint8Array::new(&arr).to_vec().as_slice(),
@@ -395,10 +397,10 @@ impl EpoxyClient {
 		options: EpoxyClientOptions,
 	) -> Result<EpoxyClient, EpoxyError> {
 		let stream_provider = if let Some(wisp_url) = transport.as_string() {
-			let wisp_uri: Uri = wisp_url.clone().try_into()?;
-			if wisp_uri.scheme_str() != Some("wss") && wisp_uri.scheme_str() != Some("ws") {
+			let uri: Uri = wisp_url.clone().try_into()?;
+			if uri.scheme_str() != Some("wss") && uri.scheme_str() != Some("ws") {
 				return Err(EpoxyError::InvalidUrlScheme(
-					wisp_uri.scheme_str().map(ToString::to_string),
+					uri.scheme_str().map(ToString::to_string),
 				));
 			}
 
@@ -538,18 +540,18 @@ impl EpoxyClient {
 			None
 		};
 
-		let res = self.client.request(req).await;
-		match res {
-			Ok(res) => {
-				if is_redirect(res.status().as_u16())
+		let resp = self.client.request(req).await;
+		match resp {
+			Ok(resp) => {
+				if is_redirect(resp.status().as_u16())
 					&& let Some(mut new_req) = new_req
-					&& let Some(location) = res.headers().get(LOCATION)
+					&& let Some(location) = resp.headers().get(LOCATION)
 					&& let Ok(redirect_url) = new_req.uri().get_redirect(location)
 				{
 					*new_req.uri_mut() = redirect_url;
-					Ok(EpoxyResponse::Redirect((res, new_req)))
+					Ok(EpoxyResponse::Redirect((resp, new_req)))
 				} else {
-					Ok(EpoxyResponse::Success(res))
+					Ok(EpoxyResponse::Success(resp))
 				}
 			}
 			Err(err) => Err(err.into()),
@@ -570,14 +572,15 @@ impl EpoxyClient {
 				EpoxyResponse::Redirect((_, req)) => {
 					redirected = true;
 					current_url = req.uri().clone();
-					current_resp = self.send_req_inner(req, should_redirect).await?
+					current_resp = self.send_req_inner(req, should_redirect).await?;
 				}
 			}
 		}
 
 		match current_resp {
-			EpoxyResponse::Success(resp) => Ok((resp, current_url, redirected)),
-			EpoxyResponse::Redirect((resp, _)) => Ok((resp, current_url, redirected)),
+			EpoxyResponse::Redirect((resp, _)) | EpoxyResponse::Success(resp) => {
+				Ok((resp, current_url, redirected))
+			}
 		}
 	}
 
@@ -753,7 +756,7 @@ impl EpoxyClient {
 		utils::define_property(&resp, "redirected", redirected.into());
 
 		let raw_headers = Object::new();
-		for (k, v) in response_headers_raw.iter() {
+		for (k, v) in &response_headers_raw {
 			let k = k.as_str();
 			let v: JsValue = v.to_str()?.to_string().into();
 			let jv = object_get(&raw_headers, k);

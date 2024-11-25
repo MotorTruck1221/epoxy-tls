@@ -76,7 +76,7 @@ impl WebSocketRead for WebSocketReader {
 		}
 		let res = futures_util::select! {
 			data = self.read_rx.recv_async() => data.ok(),
-			_ = self.close_event.listen().fuse() => Some(M::Closed),
+			() = self.close_event.listen().fuse() => Some(M::Closed),
 		};
 		match res.ok_or(WispError::WsImplSocketClosed)? {
 			M::Message(bin) => Ok(Frame::binary(Payload::Bytes(BytesMut::from(
@@ -123,8 +123,7 @@ impl WebSocketWrapper {
 		let onerror_event = error_event.clone();
 		let onerror = Closure::wrap(Box::new(move |e| {
 			let _ = onerror_tx.send(WebSocketMessage::Error(WebSocketError::Unknown(format!(
-				"{:?}",
-				e
+				"{e:?}"
 			))));
 			onerror_closed.store(true, Ordering::Release);
 			onerror_close.notify(usize::MAX);
@@ -145,7 +144,7 @@ impl WebSocketWrapper {
 					.into(),
 			)
 		}
-		.map_err(|x| EpoxyError::WebSocketConnectFailed(format!("{:?}", x)))?;
+		.map_err(|x| EpoxyError::WebSocketConnectFailed(format!("{x:?}")))?;
 		ws.set_binary_type(BinaryType::Arraybuffer);
 		ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 		ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -177,15 +176,15 @@ impl WebSocketWrapper {
 			return false;
 		}
 		futures_util::select! {
-			_ = self.open_event.listen().fuse() => true,
-			_ = self.error_event.listen().fuse() => false,
+			() = self.open_event.listen().fuse() => true,
+			() = self.error_event.listen().fuse() => false,
 		}
 	}
 }
 
 impl WebSocketWrite for WebSocketWrapper {
 	async fn wisp_write_frame(&mut self, frame: Frame<'_>) -> Result<(), WispError> {
-		use wisp_mux::ws::OpCode::*;
+		use wisp_mux::ws::OpCode::{Binary, Close, Text};
 		if self.closed.load(Ordering::Acquire) {
 			return Err(WispError::WsImplSocketClosed);
 		}
@@ -193,7 +192,7 @@ impl WebSocketWrite for WebSocketWrapper {
 			Binary | Text => self
 				.inner
 				.send_with_u8_array(&frame.payload)
-				.map_err(|x| WebSocketError::SendFailed(format!("{:?}", x)).into()),
+				.map_err(|x| WebSocketError::SendFailed(format!("{x:?}")).into()),
 			Close => {
 				let _ = self.inner.close();
 				Ok(())
@@ -205,7 +204,7 @@ impl WebSocketWrite for WebSocketWrapper {
 	async fn wisp_close(&mut self) -> Result<(), WispError> {
 		self.inner
 			.close()
-			.map_err(|x| WebSocketError::CloseFailed(format!("{:?}", x)).into())
+			.map_err(|x| WebSocketError::CloseFailed(format!("{x:?}")).into())
 	}
 }
 

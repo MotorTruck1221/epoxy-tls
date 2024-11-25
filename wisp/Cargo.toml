@@ -10,6 +10,9 @@ edition = "2021"
 keywords = ["websocket", "wisp", "multiplexor", "multiplexing", "stream"]
 categories = ["network-programming", "asynchronous", "web-programming::websocket", "wasm"]
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = "0.1.81"
 atomic_enum = "0.3.0"

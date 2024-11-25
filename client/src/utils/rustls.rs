@@ -26,7 +26,7 @@ fn map_close_notify(x: std::io::Result<usize>) -> std::io::Result<usize> {
 		Err(x) => {
 			// hacky way to find if it's actually a rustls close notify error
 			if x.kind() == ErrorKind::UnexpectedEof
-				&& format!("{:?}", x).contains("TLS close_notify")
+				&& format!("{x:?}").contains("TLS close_notify")
 			{
 				Ok(0)
 			} else {

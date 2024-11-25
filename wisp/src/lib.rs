@@ -1,11 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![warn(clippy::pedantic)]
 #![deny(missing_docs, clippy::todo)]
-#![allow(
-	clippy::must_use_candidate,
-	clippy::missing_errors_doc,
-	clippy::module_name_repetitions
-)]
 
 //! A library for easily creating [Wisp] clients and servers.
 //!
