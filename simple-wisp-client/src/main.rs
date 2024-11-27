@@ -11,7 +11,7 @@ use hyper::{
 	Request, Uri,
 };
 use hyper_util::rt::TokioIo;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256};
 use simple_moving_average::{SingleSumSMA, SMA};
 use std::{
 	error::Error,
@@ -38,7 +38,7 @@ use wisp_mux::{
 		udp::{UdpProtocolExtension, UdpProtocolExtensionBuilder},
 		AnyProtocolExtensionBuilder,
 	},
-	ClientMux, StreamType, WispError, WispV2Extensions,
+	ClientMux, StreamType, WispError, WispV2Handshake,
 };
 
 #[derive(Debug)]
@@ -113,14 +113,18 @@ async fn get_cert(path: PathBuf) -> Result<SigningKey, Box<dyn Error + Sync + Se
 	let signer = ed25519_dalek::SigningKey::from_pkcs8_pem(&data)?;
 	let binary_key = signer.verifying_key().to_bytes();
 
-	let mut hasher = Sha512::new();
+	let mut hasher = Sha256::new();
 	hasher.update(binary_key);
-	let hash: [u8; 64] = hasher.finalize().into();
+	let hash: [u8; 32] = hasher.finalize().into();
 	Ok(SigningKey::new_ed25519(Arc::new(signer), hash))
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+	tokio::spawn(real_main()).await?
+}
+
+async fn real_main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	#[cfg(feature = "tokio-console")]
 	console_subscriber::init();
 	let opts = Cli::parse();
@@ -139,7 +143,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		let split: Vec<_> = auth.split(':').collect();
 		let username = split[0].to_string();
 		let password = split[1..].join(":");
-		PasswordProtocolExtensionBuilder::new_client(username, password)
+		PasswordProtocolExtensionBuilder::new_client(Some((username, password)))
 	});
 
 	println!(
@@ -188,7 +192,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 	}
 	if let Some(certauth) = opts.certauth {
 		let key = get_cert(certauth).await?;
-		let extension = CertAuthProtocolExtensionBuilder::new_client(key);
+		let extension = CertAuthProtocolExtensionBuilder::new_client(Some(key));
 		extensions.push(AnyProtocolExtensionBuilder::new(extension));
 		extension_ids.push(CertAuthProtocolExtension::ID);
 	}
@@ -198,7 +202,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 			.await?
 			.with_no_required_extensions()
 	} else {
-		ClientMux::create(rx, tx, Some(WispV2Extensions::new(extensions)))
+		ClientMux::create(rx, tx, Some(WispV2Handshake::new(extensions)))
 			.await?
 			.with_required_extensions(extension_ids.as_slice())
 			.await?
@@ -245,7 +249,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 		}));
 		threads.push(tokio::spawn(async move {
 			loop {
-				cr.read().await;
+				let _ = cr.read().await;
 			}
 		}));
 	}

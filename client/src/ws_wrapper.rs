@@ -3,41 +3,31 @@ use std::sync::{
 	Arc,
 };
 
-use async_trait::async_trait;
 use bytes::BytesMut;
 use event_listener::Event;
 use flume::Receiver;
 use futures_util::FutureExt;
 use js_sys::{Array, ArrayBuffer, Uint8Array};
 use send_wrapper::SendWrapper;
-use wasm_bindgen::{closure::Closure, JsCast};
+use thiserror::Error;
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 use wisp_mux::{
-	ws::{Frame, LockedWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
+	ws::{Frame, LockingWebSocketWrite, Payload, WebSocketRead, WebSocketWrite},
 	WispError,
 };
 
 use crate::EpoxyError;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum WebSocketError {
-	Unknown,
-	SendFailed,
-	CloseFailed,
+	#[error("Unknown JS WebSocket wrapper error: {0:?}")]
+	Unknown(String),
+	#[error("Failed to call WebSocket.send: {0:?}")]
+	SendFailed(String),
+	#[error("Failed to call WebSocket.close: {0:?}")]
+	CloseFailed(String),
 }
-
-impl std::fmt::Display for WebSocketError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-		use WebSocketError::*;
-		match self {
-			Unknown => write!(f, "Unknown error"),
-			SendFailed => write!(f, "Send failed"),
-			CloseFailed => write!(f, "Close failed"),
-		}
-	}
-}
-
-impl std::error::Error for WebSocketError {}
 
 impl From<WebSocketError> for WispError {
 	fn from(err: WebSocketError) -> Self {
@@ -47,12 +37,12 @@ impl From<WebSocketError> for WispError {
 
 pub enum WebSocketMessage {
 	Closed,
-	Error,
+	Error(WebSocketError),
 	Message(Vec<u8>),
 }
 
 pub struct WebSocketWrapper {
-	inner: SendWrapper<WebSocket>,
+	pub inner: SendWrapper<WebSocket>,
 	open_event: Arc<Event>,
 	error_event: Arc<Event>,
 	close_event: Arc<Event>,
@@ -64,7 +54,7 @@ pub struct WebSocketWrapper {
 	#[allow(dead_code)]
 	onclose: SendWrapper<Closure<dyn Fn()>>,
 	#[allow(dead_code)]
-	onerror: SendWrapper<Closure<dyn Fn()>>,
+	onerror: SendWrapper<Closure<dyn Fn(JsValue)>>,
 	#[allow(dead_code)]
 	onmessage: SendWrapper<Closure<dyn Fn(MessageEvent)>>,
 }
@@ -75,26 +65,25 @@ pub struct WebSocketReader {
 	close_event: Arc<Event>,
 }
 
-#[async_trait]
 impl WebSocketRead for WebSocketReader {
 	async fn wisp_read_frame(
 		&mut self,
-		_: &LockedWebSocketWrite,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<Frame<'static>, WispError> {
-		use WebSocketMessage::*;
+		use WebSocketMessage as M;
 		if self.closed.load(Ordering::Acquire) {
 			return Err(WispError::WsImplSocketClosed);
 		}
 		let res = futures_util::select! {
 			data = self.read_rx.recv_async() => data.ok(),
-			_ = self.close_event.listen().fuse() => Some(Closed),
+			() = self.close_event.listen().fuse() => Some(M::Closed),
 		};
 		match res.ok_or(WispError::WsImplSocketClosed)? {
-			Message(bin) => Ok(Frame::binary(Payload::Bytes(BytesMut::from(
+			M::Message(bin) => Ok(Frame::binary(Payload::Bytes(BytesMut::from(
 				bin.as_slice(),
 			)))),
-			Error => Err(WebSocketError::Unknown.into()),
-			Closed => Err(WispError::WsImplSocketClosed),
+			M::Error(x) => Err(x.into()),
+			M::Closed => Err(WispError::WsImplSocketClosed),
 		}
 	}
 }
@@ -132,12 +121,14 @@ impl WebSocketWrapper {
 		let onerror_closed = closed.clone();
 		let onerror_close = close_event.clone();
 		let onerror_event = error_event.clone();
-		let onerror = Closure::wrap(Box::new(move || {
-			let _ = onerror_tx.send(WebSocketMessage::Error);
+		let onerror = Closure::wrap(Box::new(move |e| {
+			let _ = onerror_tx.send(WebSocketMessage::Error(WebSocketError::Unknown(format!(
+				"{e:?}"
+			))));
 			onerror_closed.store(true, Ordering::Release);
 			onerror_close.notify(usize::MAX);
 			onerror_event.notify(usize::MAX);
-		}) as Box<dyn Fn()>);
+		}) as Box<dyn Fn(JsValue)>);
 
 		let ws = if protocols.is_empty() {
 			WebSocket::new(url)
@@ -153,7 +144,7 @@ impl WebSocketWrapper {
 					.into(),
 			)
 		}
-		.map_err(|_| EpoxyError::WebSocketConnectFailed)?;
+		.map_err(|x| EpoxyError::WebSocketConnectFailed(format!("{x:?}")))?;
 		ws.set_binary_type(BinaryType::Arraybuffer);
 		ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 		ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -185,16 +176,15 @@ impl WebSocketWrapper {
 			return false;
 		}
 		futures_util::select! {
-			_ = self.open_event.listen().fuse() => true,
-			_ = self.error_event.listen().fuse() => false,
+			() = self.open_event.listen().fuse() => true,
+			() = self.error_event.listen().fuse() => false,
 		}
 	}
 }
 
-#[async_trait]
 impl WebSocketWrite for WebSocketWrapper {
 	async fn wisp_write_frame(&mut self, frame: Frame<'_>) -> Result<(), WispError> {
-		use wisp_mux::ws::OpCode::*;
+		use wisp_mux::ws::OpCode::{Binary, Close, Text};
 		if self.closed.load(Ordering::Acquire) {
 			return Err(WispError::WsImplSocketClosed);
 		}
@@ -202,7 +192,7 @@ impl WebSocketWrite for WebSocketWrapper {
 			Binary | Text => self
 				.inner
 				.send_with_u8_array(&frame.payload)
-				.map_err(|_| WebSocketError::SendFailed.into()),
+				.map_err(|x| WebSocketError::SendFailed(format!("{x:?}")).into()),
 			Close => {
 				let _ = self.inner.close();
 				Ok(())
@@ -214,7 +204,7 @@ impl WebSocketWrite for WebSocketWrapper {
 	async fn wisp_close(&mut self) -> Result<(), WispError> {
 		self.inner
 			.close()
-			.map_err(|_| WebSocketError::CloseFailed.into())
+			.map_err(|x| WebSocketError::CloseFailed(format!("{x:?}")).into())
 	}
 }
 

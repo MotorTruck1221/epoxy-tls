@@ -3,13 +3,17 @@ name = "epoxy-server"
 version = "2.0.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1.0.86"
-async-trait = { version = "0.1.81", optional = true }
+async-speed-limit = { version = "0.4.2", optional = true }
+async-trait = "0.1.81"
+base64 = "0.22.1"
 bytes = "1.7.1"
 cfg-if = "1.0.0"
 clap = { version = "4.5.16", features = ["cargo", "derive"] }
-dashmap = "6.0.1"
 ed25519-dalek = { version = "2.1.1", features = ["pem"] }
 env_logger = "0.11.5"
 event-listener = "5.3.1"
@@ -23,6 +27,7 @@ lazy_static = "1.5.0"
 libc = { version = "0.2.158", optional = true }
 log = { version = "0.4.22", features = ["serde", "std"] }
 nix = { version = "0.29.0", features = ["term"] }
+pin-project-lite = "0.2.15"
 pty-process = { version = "0.4.0", features = ["async", "tokio"], optional = true }
 regex = "1.10.6"
 rustls-pemfile = "2.1.3"
@@ -38,7 +43,7 @@ tokio-rustls = { version = "0.26.0", features = ["ring", "tls12"], default-featu
 tokio-util = { version = "0.7.11", features = ["codec", "compat", "io-util", "net"] }
 toml = { version = "0.8.19", optional = true }
 uuid = { version = "1.10.0", features = ["v4"] }
-wisp-mux = { version = "5.0.0", path = "../wisp", features = ["fastwebsockets", "generic_stream", "certificate"] }
+wisp-mux = { version = "*", path = "../wisp", features = ["fastwebsockets", "generic_stream", "certificate"] }
 
 [features]
 default = ["toml"]
@@ -46,7 +51,8 @@ default = ["toml"]
 yaml = ["dep:serde_yaml"]
 toml = ["dep:toml"]
 
-twisp = ["dep:pty-process", "dep:libc", "dep:async-trait", "dep:shell-words"]
+twisp = ["dep:pty-process", "dep:libc", "dep:shell-words"]
+speed-limit = ["dep:async-speed-limit"]
 
 [build-dependencies]
 vergen-git2 = { version = "1.0.0", features = ["rustc"] }

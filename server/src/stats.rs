@@ -50,7 +50,7 @@ impl From<(ConnectPacket, ConnectPacket)> for StreamStats {
 
 #[derive(Serialize)]
 struct ClientStats {
-	wsproxy: bool,
+	client_type: String,
 	streams: HashMap<String, StreamStats>,
 }
 
@@ -61,7 +61,7 @@ struct ServerStats {
 	memory: MemoryStats,
 }
 
-pub fn generate_stats() -> anyhow::Result<String> {
+pub async fn generate_stats() -> anyhow::Result<String> {
 	use tikv_jemalloc_ctl::stats::{active, allocated, mapped, metadata, resident, retained};
 	tikv_jemalloc_ctl::epoch::advance()?;
 
@@ -74,23 +74,27 @@ pub fn generate_stats() -> anyhow::Result<String> {
 		retained: retained::read()? as f64 / (1024 * 1024) as f64,
 	};
 
-	let clients = CLIENTS
-		.iter()
-		.map(|x| {
-			(
-				x.key().to_string(),
-				ClientStats {
-					wsproxy: x.value().1,
-					streams: x
-						.value()
-						.0
-						.iter()
-						.map(|x| (x.key().to_string(), StreamStats::from(x.value().clone())))
-						.collect(),
-				},
-			)
-		})
-		.collect();
+	let clients_locked = CLIENTS.lock().await;
+
+	let mut clients = HashMap::with_capacity(clients_locked.len());
+	for client in clients_locked.iter() {
+		clients.insert(
+			client.0.to_string(),
+			ClientStats {
+				client_type: client.1 .1.clone(),
+				streams: client
+					.1
+					 .0
+					.lock()
+					.await
+					.iter()
+					.map(|x| (x.0.to_string(), StreamStats::from(x.1.clone())))
+					.collect(),
+			},
+		);
+	}
+
+	drop(clients_locked);
 
 	let stats = ServerStats {
 		config: CONFIG.ser()?,

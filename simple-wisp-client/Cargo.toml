@@ -3,6 +3,9 @@ name = "simple-wisp-client"
 version = "1.0.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 atomic-counter = "1.0.1"
 bytes = "1.7.1"

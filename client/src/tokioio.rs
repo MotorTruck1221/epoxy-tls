@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! hyper_util::rt::tokio::TokioIo
+//! `hyper_util::rt::tokio::TokioIo`
 
 use std::{
 	pin::Pin,

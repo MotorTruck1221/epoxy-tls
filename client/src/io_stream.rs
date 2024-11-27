@@ -1,186 +1,56 @@
-use bytes::{buf::UninitSlice, BufMut, BytesMut};
-use futures_util::{io::WriteHalf, lock::Mutex, AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt};
-use js_sys::{Function, Uint8Array};
+use std::pin::Pin;
+
+use bytes::{Bytes, BytesMut};
+use futures_util::{AsyncReadExt, AsyncWriteExt, Sink, SinkExt, Stream, TryStreamExt};
+use js_sys::{Object, Uint8Array};
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::spawn_local;
-use wisp_mux::MuxStreamIoSink;
+use wasm_streams::{ReadableStream, WritableStream};
 
 use crate::{
 	stream_provider::{ProviderAsyncRW, ProviderUnencryptedStream},
-	utils::convert_body,
-	EpoxyError, EpoxyHandlers,
+	utils::{convert_body, object_set, ReaderStream},
+	EpoxyError, EpoxyIoStream,
 };
 
-#[wasm_bindgen]
-pub struct EpoxyIoStream {
-	tx: Mutex<WriteHalf<ProviderAsyncRW>>,
-	onerror: Function,
+fn create_iostream(
+	stream: Pin<Box<dyn Stream<Item = Result<Bytes, EpoxyError>>>>,
+	sink: Pin<Box<dyn Sink<BytesMut, Error = EpoxyError>>>,
+) -> EpoxyIoStream {
+	let read = ReadableStream::from_stream(
+		stream
+			.map_ok(|x| Uint8Array::from(x.as_ref()).into())
+			.map_err(Into::into),
+	)
+	.into_raw();
+	let write = WritableStream::from_sink(
+		sink.with(|x| async {
+			convert_body(x)
+				.await
+				.map_err(|_| EpoxyError::InvalidPayload)
+				.map(|x| BytesMut::from(x.0.to_vec().as_slice()))
+		})
+		.sink_map_err(Into::into),
+	)
+	.into_raw();
+
+	let out = Object::new();
+	object_set(&out, "read", read.into());
+	object_set(&out, "write", write.into());
+	JsValue::from(out).into()
 }
 
-#[wasm_bindgen]
-impl EpoxyIoStream {
-	pub(crate) fn connect(stream: ProviderAsyncRW, handlers: EpoxyHandlers) -> Self {
-		let (mut rx, tx) = stream.split();
-		let tx = Mutex::new(tx);
-
-		let EpoxyHandlers {
-			onopen,
-			onclose,
-			onerror,
-			onmessage,
-		} = handlers;
-
-		let onerror_cloned = onerror.clone();
-
-		// similar to tokio_util::io::ReaderStream
-		spawn_local(async move {
-			let mut buf = BytesMut::with_capacity(4096);
-			loop {
-				match rx
-					.read(unsafe {
-						std::mem::transmute::<&mut UninitSlice, &mut [u8]>(buf.chunk_mut())
-					})
-					.await
-				{
-					Ok(cnt) => {
-						if cnt > 0 {
-							unsafe { buf.advance_mut(cnt) };
-
-							let _ = onmessage
-								.call1(&JsValue::null(), &Uint8Array::from(buf.split().as_ref()));
-						}
-					}
-					Err(err) => {
-						let _ = onerror.call1(&JsValue::null(), &JsError::from(err).into());
-						break;
-					}
-				}
-			}
-			let _ = onclose.call0(&JsValue::null());
-		});
-
-		let _ = onopen.call0(&JsValue::null());
-
-		Self {
-			tx,
-			onerror: onerror_cloned,
-		}
-	}
-
-	pub async fn send(&self, payload: JsValue) -> Result<(), EpoxyError> {
-		let ret: Result<(), EpoxyError> = async move {
-			let payload = convert_body(payload)
-				.await
-				.map_err(|_| EpoxyError::InvalidPayload)?
-				.0
-				.to_vec();
-			Ok(self.tx.lock().await.write_all(&payload).await?)
-		}
-		.await;
-
-		match ret {
-			Ok(ok) => Ok(ok),
-			Err(err) => {
-				let _ = self
-					.onerror
-					.call1(&JsValue::null(), &err.to_string().into());
-				Err(err)
-			}
-		}
-	}
-
-	pub async fn close(&self) -> Result<(), EpoxyError> {
-		match self.tx.lock().await.close().await {
-			Ok(ok) => Ok(ok),
-			Err(err) => {
-				let _ = self
-					.onerror
-					.call1(&JsValue::null(), &err.to_string().into());
-				Err(err.into())
-			}
-		}
-	}
+pub fn iostream_from_asyncrw(asyncrw: ProviderAsyncRW, buffer_size: usize) -> EpoxyIoStream {
+	let (rx, tx) = asyncrw.split();
+	create_iostream(
+		Box::pin(ReaderStream::new(Box::pin(rx), buffer_size).map_err(EpoxyError::Io)),
+		Box::pin(tx.into_sink().sink_map_err(EpoxyError::Io)),
+	)
 }
 
-#[wasm_bindgen]
-pub struct EpoxyUdpStream {
-	tx: Mutex<MuxStreamIoSink>,
-	onerror: Function,
-}
-
-#[wasm_bindgen]
-impl EpoxyUdpStream {
-	pub(crate) fn connect(stream: ProviderUnencryptedStream, handlers: EpoxyHandlers) -> Self {
-		let (mut rx, tx) = stream.into_split();
-
-		let EpoxyHandlers {
-			onopen,
-			onclose,
-			onerror,
-			onmessage,
-		} = handlers;
-
-		let onerror_cloned = onerror.clone();
-
-		spawn_local(async move {
-			while let Some(packet) = rx.next().await {
-				match packet {
-					Ok(buf) => {
-						let _ = onmessage.call1(&JsValue::null(), &Uint8Array::from(buf.as_ref()));
-					}
-					Err(err) => {
-						let _ = onerror.call1(&JsValue::null(), &JsError::from(err).into());
-						break;
-					}
-				}
-			}
-			let _ = onclose.call0(&JsValue::null());
-		});
-
-		let _ = onopen.call0(&JsValue::null());
-
-		Self {
-			tx: tx.into(),
-			onerror: onerror_cloned,
-		}
-	}
-
-	pub async fn send(&self, payload: JsValue) -> Result<(), EpoxyError> {
-		let ret: Result<(), EpoxyError> = async move {
-			let payload = convert_body(payload)
-				.await
-				.map_err(|_| EpoxyError::InvalidPayload)?
-				.0
-				.to_vec();
-			Ok(self
-				.tx
-				.lock()
-				.await
-				.send(BytesMut::from(payload.as_slice()))
-				.await?)
-		}
-		.await;
-
-		match ret {
-			Ok(ok) => Ok(ok),
-			Err(err) => {
-				let _ = self
-					.onerror
-					.call1(&JsValue::null(), &err.to_string().into());
-				Err(err)
-			}
-		}
-	}
-
-	pub async fn close(&self) -> Result<(), EpoxyError> {
-		match self.tx.lock().await.close().await {
-			Ok(ok) => Ok(ok),
-			Err(err) => {
-				let _ = self
-					.onerror
-					.call1(&JsValue::null(), &err.to_string().into());
-				Err(err.into())
-			}
-		}
-	}
+pub fn iostream_from_stream(stream: ProviderUnencryptedStream) -> EpoxyIoStream {
+	let (rx, tx) = stream.into_split();
+	create_iostream(
+		Box::pin(rx.map_err(EpoxyError::Io)),
+		Box::pin(tx.sink_map_err(EpoxyError::Io)),
+	)
 }

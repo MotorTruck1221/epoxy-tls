@@ -2,7 +2,6 @@
 
 use std::ops::Deref;
 
-use async_trait::async_trait;
 use bytes::BytesMut;
 use fastwebsockets::{
 	CloseCode, FragmentCollectorRead, Frame, OpCode, Payload, WebSocketError, WebSocketRead,
@@ -10,7 +9,7 @@ use fastwebsockets::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{ws::LockedWebSocketWrite, WispError};
+use crate::{ws::LockingWebSocketWrite, WispError};
 
 fn match_payload(payload: Payload<'_>) -> crate::ws::Payload<'_> {
 	match payload {
@@ -87,27 +86,25 @@ impl From<WebSocketError> for crate::WispError {
 	}
 }
 
-#[async_trait]
 impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for FragmentCollectorRead<S> {
 	async fn wisp_read_frame(
 		&mut self,
-		tx: &LockedWebSocketWrite,
+		tx: &dyn LockingWebSocketWrite,
 	) -> Result<crate::ws::Frame<'static>, WispError> {
 		Ok(self
-			.read_frame(&mut |frame| async { tx.write_frame(frame.into()).await })
+			.read_frame(&mut |frame| async { tx.wisp_write_frame(frame.into()).await })
 			.await?
 			.into())
 	}
 }
 
-#[async_trait]
 impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> {
 	async fn wisp_read_frame(
 		&mut self,
-		tx: &LockedWebSocketWrite,
+		tx: &dyn LockingWebSocketWrite,
 	) -> Result<crate::ws::Frame<'static>, WispError> {
 		let mut frame = self
-			.read_frame(&mut |frame| async { tx.write_frame(frame.into()).await })
+			.read_frame(&mut |frame| async { tx.wisp_write_frame(frame.into()).await })
 			.await?;
 
 		if frame.opcode == OpCode::Continuation {
@@ -121,7 +118,7 @@ impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> 
 
 		while !frame.fin {
 			frame = self
-				.read_frame(&mut |frame| async { tx.write_frame(frame.into()).await })
+				.read_frame(&mut |frame| async { tx.wisp_write_frame(frame.into()).await })
 				.await?;
 
 			if frame.opcode != OpCode::Continuation {
@@ -142,11 +139,11 @@ impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> 
 
 	async fn wisp_read_split(
 		&mut self,
-		tx: &LockedWebSocketWrite,
+		tx: &dyn LockingWebSocketWrite,
 	) -> Result<(crate::ws::Frame<'static>, Option<crate::ws::Frame<'static>>), WispError> {
 		let mut frame_cnt = 1;
 		let mut frame = self
-			.read_frame(&mut |frame| async { tx.write_frame(frame.into()).await })
+			.read_frame(&mut |frame| async { tx.wisp_write_frame(frame.into()).await })
 			.await?;
 		let mut extra_frame = None;
 
@@ -161,7 +158,7 @@ impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> 
 
 		while !frame.fin {
 			frame = self
-				.read_frame(&mut |frame| async { tx.write_frame(frame.into()).await })
+				.read_frame(&mut |frame| async { tx.wisp_write_frame(frame.into()).await })
 				.await?;
 
 			if frame.opcode != OpCode::Continuation {
@@ -197,7 +194,6 @@ impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> 
 	}
 }
 
-#[async_trait]
 impl<S: AsyncWrite + Unpin + Send> crate::ws::WebSocketWrite for WebSocketWrite<S> {
 	async fn wisp_write_frame(&mut self, frame: crate::ws::Frame<'_>) -> Result<(), WispError> {
 		self.write_frame(frame.into()).await.map_err(|e| e.into())

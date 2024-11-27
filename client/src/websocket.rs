@@ -12,19 +12,25 @@ use http::{
 	},
 	Method, Request, Response, StatusCode, Uri,
 };
+use http_body_util::Empty;
 use hyper::{
 	body::Incoming,
+	client::conn::http1,
 	upgrade::{self, Upgraded},
 };
+use hyper_util_wasm::client::legacy::connect::ConnectSvc;
 use js_sys::{ArrayBuffer, Function, Uint8Array};
 use tokio::io::WriteHalf;
 use wasm_bindgen::{prelude::*, JsError, JsValue};
 use wasm_bindgen_futures::spawn_local;
 
 use crate::{
+	console_error,
+	stream_provider::StreamProviderService,
 	tokioio::TokioIo,
 	utils::{entries_of_object, from_entries, ws_key},
-	EpoxyClient, EpoxyError, EpoxyHandlers, HttpBody,
+	EpoxyClient, EpoxyError, EpoxyHandlers, EpoxyUrlInput, EpoxyWebSocketHeadersInput,
+	EpoxyWebSocketInput,
 };
 
 #[wasm_bindgen]
@@ -38,11 +44,12 @@ impl EpoxyWebSocket {
 	pub(crate) async fn connect(
 		client: &EpoxyClient,
 		handlers: EpoxyHandlers,
-		url: String,
+		url: EpoxyUrlInput,
 		protocols: Vec<String>,
-		headers: JsValue,
+		headers: EpoxyWebSocketHeadersInput,
 		user_agent: &str,
 	) -> Result<Self, EpoxyError> {
+		let headers = JsValue::from(headers);
 		let EpoxyHandlers {
 			onopen,
 			onclose,
@@ -54,35 +61,35 @@ impl EpoxyWebSocket {
 			let url: Uri = url.try_into()?;
 			let host = url.host().ok_or(EpoxyError::NoUrlHost)?;
 
-			let mut request = Request::builder()
+			let mut req = Request::builder()
 				.method(Method::GET)
 				.uri(url.clone())
 				.header(HOST, host)
-				.header(CONNECTION, "upgrade")
+				.header(CONNECTION, "Upgrade")
 				.header(UPGRADE, "websocket")
 				.header(SEC_WEBSOCKET_KEY, ws_key())
 				.header(SEC_WEBSOCKET_VERSION, "13")
 				.header(USER_AGENT, user_agent);
 
 			if !protocols.is_empty() {
-				request = request.header(SEC_WEBSOCKET_PROTOCOL, protocols.join(","));
+				req = req.header(SEC_WEBSOCKET_PROTOCOL, protocols.join(","));
 			}
 
 			if web_sys::Headers::instanceof(&headers)
 				&& let Ok(entries) = from_entries(&headers)
 			{
 				for header in entries_of_object(&entries) {
-					request = request.header(&header[0], &header[1]);
+					req = req.header(&header[0], &header[1]);
 				}
 			} else if headers.is_truthy() {
 				for header in entries_of_object(&headers.into()) {
-					request = request.header(&header[0], &header[1]);
+					req = req.header(&header[0], &header[1]);
 				}
 			}
 
-			let request = request.body(HttpBody::new(Bytes::new()))?;
+			let req = req.body(Empty::new())?;
 
-			let mut response = client.client.request(request).await?;
+			let mut response = request(req, client).await?;
 			verify(&response)?;
 
 			let websocket = WebSocket::after_handshake(
@@ -151,7 +158,7 @@ impl EpoxyWebSocket {
 		}
 	}
 
-	pub async fn send(&self, payload: JsValue) -> Result<(), EpoxyError> {
+	pub async fn send(&self, payload: EpoxyWebSocketInput) -> Result<(), EpoxyError> {
 		let ret = if let Some(str) = payload.as_string() {
 			self.tx
 				.lock()
@@ -159,17 +166,20 @@ impl EpoxyWebSocket {
 				.write_frame(Frame::text(Payload::Owned(str.as_bytes().to_vec())))
 				.await
 				.map_err(EpoxyError::from)
-		} else if let Ok(binary) = payload.dyn_into::<ArrayBuffer>() {
+		} else if let Some(binary) = payload.dyn_ref::<ArrayBuffer>() {
 			self.tx
 				.lock()
 				.await
 				.write_frame(Frame::binary(Payload::Owned(
-					Uint8Array::new(&binary).to_vec(),
+					Uint8Array::new(binary).to_vec(),
 				)))
 				.await
 				.map_err(EpoxyError::from)
 		} else {
-			Err(EpoxyError::WsInvalidPayload)
+			Err(EpoxyError::WsInvalidPayload(format!(
+				"{:?}",
+				JsValue::from(payload)
+			)))
 		};
 
 		match ret {
@@ -200,6 +210,29 @@ impl EpoxyWebSocket {
 			}
 		}
 	}
+}
+
+async fn request(
+	req: Request<Empty<Bytes>>,
+	client: &EpoxyClient,
+) -> Result<Response<Incoming>, EpoxyError> {
+	let stream = StreamProviderService(client.stream_provider.clone())
+		.connect(req.uri().clone())
+		.await?;
+
+	let (mut sender, conn) = http1::Builder::new()
+		.title_case_headers(client.ws_title_case_headers)
+		.max_headers(client.header_limit)
+		.handshake(stream)
+		.await?;
+
+	spawn_local(async move {
+		if let Err(err) = conn.with_upgrades().await {
+			console_error!("epoxy: websocket connection task failed: {:?}", err);
+		}
+	});
+
+	Ok(sender.send_request(req).await?)
 }
 
 // https://github.com/snapview/tungstenite-rs/blob/314feea3055a93e585882fb769854a912a7e6dae/src/handshake/client.rs#L189

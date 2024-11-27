@@ -5,23 +5,23 @@ use std::sync::{
 
 use crate::{
 	extensions::AnyProtocolExtension,
-	ws::{Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead},
+	ws::{Frame, LockedWebSocketWrite, OpCode, Payload, WebSocketRead, WebSocketWrite},
 	AtomicCloseReason, ClosePacket, CloseReason, ConnectPacket, MuxStream, Packet, PacketType,
 	Role, StreamType, WispError,
 };
 use bytes::{Bytes, BytesMut};
 use event_listener::Event;
 use flume as mpsc;
-use futures::{channel::oneshot, select, FutureExt};
+use futures::{channel::oneshot, select, stream::unfold, FutureExt, StreamExt};
 use nohash_hasher::IntMap;
 
-pub(crate) enum WsEvent {
+pub(crate) enum WsEvent<W: WebSocketWrite + 'static> {
 	Close(Packet<'static>, oneshot::Sender<Result<(), WispError>>),
 	CreateStream(
 		StreamType,
 		String,
 		u16,
-		oneshot::Sender<Result<MuxStream, WispError>>,
+		oneshot::Sender<Result<MuxStream<W>, WispError>>,
 	),
 	SendPing(Payload<'static>, oneshot::Sender<Result<(), WispError>>),
 	SendPong(Payload<'static>),
@@ -43,17 +43,21 @@ struct MuxMapValue {
 	is_closed_event: Arc<Event>,
 }
 
-pub struct MuxInner<R: WebSocketRead + Send> {
+pub(crate) struct MuxInner<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> {
 	// gets taken by the mux task
 	rx: Option<R>,
-	tx: LockedWebSocketWrite,
-	extensions: Vec<AnyProtocolExtension>,
+	// gets taken by the mux task
+	maybe_downgrade_packet: Option<Packet<'static>>,
+
+	tx: LockedWebSocketWrite<W>,
+	// gets taken by the mux task
+	extensions: Option<Vec<AnyProtocolExtension>>,
 	tcp_extensions: Vec<u8>,
 	role: Role,
 
 	// gets taken by the mux task
-	actor_rx: Option<mpsc::Receiver<WsEvent>>,
-	actor_tx: mpsc::Sender<WsEvent>,
+	actor_rx: Option<mpsc::Receiver<WsEvent<W>>>,
+	actor_tx: mpsc::Sender<WsEvent<W>>,
 	fut_exited: Arc<AtomicBool>,
 
 	stream_map: IntMap<u32, MuxMapValue>,
@@ -61,16 +65,16 @@ pub struct MuxInner<R: WebSocketRead + Send> {
 	buffer_size: u32,
 	target_buffer_size: u32,
 
-	server_tx: mpsc::Sender<(ConnectPacket, MuxStream)>,
+	server_tx: mpsc::Sender<(ConnectPacket, MuxStream<W>)>,
 }
 
-pub struct MuxInnerResult<R: WebSocketRead + Send> {
-	pub mux: MuxInner<R>,
+pub(crate) struct MuxInnerResult<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> {
+	pub mux: MuxInner<R, W>,
 	pub actor_exited: Arc<AtomicBool>,
-	pub actor_tx: mpsc::Sender<WsEvent>,
+	pub actor_tx: mpsc::Sender<WsEvent<W>>,
 }
 
-impl<R: WebSocketRead + Send> MuxInner<R> {
+impl<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> MuxInner<R, W> {
 	fn get_tcp_extensions(extensions: &[AnyProtocolExtension]) -> Vec<u8> {
 		extensions
 			.iter()
@@ -80,24 +84,31 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 			.collect()
 	}
 
+	#[expect(clippy::type_complexity)]
 	pub fn new_server(
 		rx: R,
-		tx: LockedWebSocketWrite,
+		maybe_downgrade_packet: Option<Packet<'static>>,
+		tx: LockedWebSocketWrite<W>,
 		extensions: Vec<AnyProtocolExtension>,
 		buffer_size: u32,
 	) -> (
-		MuxInnerResult<R>,
-		mpsc::Receiver<(ConnectPacket, MuxStream)>,
+		MuxInnerResult<R, W>,
+		mpsc::Receiver<(ConnectPacket, MuxStream<W>)>,
 	) {
-		let (fut_tx, fut_rx) = mpsc::bounded::<WsEvent>(256);
-		let (server_tx, server_rx) = mpsc::unbounded::<(ConnectPacket, MuxStream)>();
+		let (fut_tx, fut_rx) = mpsc::bounded::<WsEvent<W>>(256);
+		let (server_tx, server_rx) = mpsc::unbounded::<(ConnectPacket, MuxStream<W>)>();
 		let ret_fut_tx = fut_tx.clone();
 		let fut_exited = Arc::new(AtomicBool::new(false));
+
+		// 90% of the buffer size, not possible to overflow
+		#[expect(clippy::cast_possible_truncation)]
+		let target_buffer_size = ((u64::from(buffer_size) * 90) / 100) as u32;
 
 		(
 			MuxInnerResult {
 				mux: Self {
 					rx: Some(rx),
+					maybe_downgrade_packet,
 					tx,
 
 					actor_rx: Some(fut_rx),
@@ -105,9 +116,9 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 					fut_exited: fut_exited.clone(),
 
 					tcp_extensions: Self::get_tcp_extensions(&extensions),
-					extensions,
+					extensions: Some(extensions),
 					buffer_size,
-					target_buffer_size: ((buffer_size as u64 * 90) / 100) as u32,
+					target_buffer_size,
 
 					role: Role::Server,
 
@@ -124,18 +135,20 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 
 	pub fn new_client(
 		rx: R,
-		tx: LockedWebSocketWrite,
+		maybe_downgrade_packet: Option<Packet<'static>>,
+		tx: LockedWebSocketWrite<W>,
 		extensions: Vec<AnyProtocolExtension>,
 		buffer_size: u32,
-	) -> MuxInnerResult<R> {
-		let (fut_tx, fut_rx) = mpsc::bounded::<WsEvent>(256);
-		let (server_tx, _) = mpsc::unbounded::<(ConnectPacket, MuxStream)>();
+	) -> MuxInnerResult<R, W> {
+		let (fut_tx, fut_rx) = mpsc::bounded::<WsEvent<W>>(256);
+		let (server_tx, _) = mpsc::unbounded::<(ConnectPacket, MuxStream<W>)>();
 		let ret_fut_tx = fut_tx.clone();
 		let fut_exited = Arc::new(AtomicBool::new(false));
 
 		MuxInnerResult {
 			mux: Self {
 				rx: Some(rx),
+				maybe_downgrade_packet,
 				tx,
 
 				actor_rx: Some(fut_rx),
@@ -143,7 +156,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				fut_exited: fut_exited.clone(),
 
 				tcp_extensions: Self::get_tcp_extensions(&extensions),
-				extensions,
+				extensions: Some(extensions),
 				buffer_size,
 				target_buffer_size: 0,
 
@@ -163,8 +176,8 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 
 		self.fut_exited.store(true, Ordering::Release);
 
-		for (_, stream) in self.stream_map.iter() {
-			self.close_stream(stream, ClosePacket::new(CloseReason::Unknown));
+		for stream in self.stream_map.values() {
+			Self::close_stream(stream, ClosePacket::new(CloseReason::Unknown));
 		}
 		self.stream_map.clear();
 
@@ -172,12 +185,16 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		ret
 	}
 
-	async fn create_new_stream(
+	fn create_new_stream(
 		&mut self,
 		stream_id: u32,
 		stream_type: StreamType,
-	) -> Result<(MuxMapValue, MuxStream), WispError> {
-		let (ch_tx, ch_rx) = mpsc::bounded(self.buffer_size as usize);
+	) -> (MuxMapValue, MuxStream<W>) {
+		let (ch_tx, ch_rx) = mpsc::bounded(if self.role == Role::Server {
+			self.buffer_size as usize
+		} else {
+			usize::MAX - 8
+		});
 
 		let should_flow_control = self.tcp_extensions.contains(&stream_type.into());
 		let flow_control_event: Arc<Event> = Event::new().into();
@@ -188,7 +205,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 			AtomicCloseReason::new(CloseReason::Unknown).into();
 		let is_closed_event: Arc<Event> = Event::new().into();
 
-		Ok((
+		(
 			MuxMapValue {
 				stream: ch_tx,
 				stream_type,
@@ -216,10 +233,10 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				flow_control_event,
 				self.target_buffer_size,
 			),
-		))
+		)
 	}
 
-	fn close_stream(&self, stream: &MuxMapValue, close_packet: ClosePacket) {
+	fn close_stream(stream: &MuxMapValue, close_packet: ClosePacket) {
 		stream
 			.close_reason
 			.store(close_packet.reason, Ordering::Release);
@@ -230,11 +247,12 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 	}
 
 	async fn process_wisp_message(
-		&mut self,
 		rx: &mut R,
-		msg: Result<(Frame<'static>, Option<Frame<'static>>), WispError>,
-	) -> Result<Option<WsEvent>, WispError> {
-		let (mut frame, optional_frame) = msg?;
+		tx: &LockedWebSocketWrite<W>,
+		extensions: &mut [AnyProtocolExtension],
+		msg: (Frame<'static>, Option<Frame<'static>>),
+	) -> Result<Option<WsEvent<W>>, WispError> {
+		let (mut frame, optional_frame) = msg;
 		if frame.opcode == OpCode::Close {
 			return Ok(None);
 		} else if frame.opcode == OpCode::Ping {
@@ -251,8 +269,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 			}
 		}
 
-		let packet =
-			Packet::maybe_handle_extension(frame, &mut self.extensions, rx, &self.tx).await?;
+		let packet = Packet::maybe_handle_extension(frame, extensions, rx, tx).await?;
 
 		Ok(Some(WsEvent::WispMessage(packet, optional_frame)))
 	}
@@ -260,35 +277,53 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 	async fn stream_loop(&mut self) -> Result<(), WispError> {
 		let mut next_free_stream_id: u32 = 1;
 
-		let mut rx = self.rx.take().ok_or(WispError::MuxTaskStarted)?;
+		let rx = self.rx.take().ok_or(WispError::MuxTaskStarted)?;
+		let maybe_downgrade_packet = self.maybe_downgrade_packet.take();
+
 		let tx = self.tx.clone();
 		let fut_rx = self.actor_rx.take().ok_or(WispError::MuxTaskStarted)?;
 
+		let extensions = self.extensions.take().ok_or(WispError::MuxTaskStarted)?;
+
+		if let Some(downgrade_packet) = maybe_downgrade_packet {
+			if self.handle_packet(downgrade_packet, None).await? {
+				return Ok(());
+			}
+		}
+
+		let mut read_stream = Box::pin(unfold(
+			(rx, tx.clone(), extensions),
+			|(mut rx, tx, mut extensions)| async {
+				let ret = async {
+					let msg = rx.wisp_read_split(&tx).await?;
+					Self::process_wisp_message(&mut rx, &tx, &mut extensions, msg).await
+				}
+				.await;
+				ret.transpose().map(|x| (x, (rx, tx, extensions)))
+			},
+		))
+		.fuse();
+
 		let mut recv_fut = fut_rx.recv_async().fuse();
-		let mut read_fut = rx.wisp_read_split(&tx).fuse();
 		while let Some(msg) = select! {
 			x = recv_fut => {
 				drop(recv_fut);
 				recv_fut = fut_rx.recv_async().fuse();
 				Ok(x.ok())
 			},
-			x = read_fut => {
-				drop(read_fut);
-				let ret = self.process_wisp_message(&mut rx, x).await;
-				read_fut = rx.wisp_read_split(&tx).fuse();
-				ret
+			x = read_stream.next() => {
+				x.transpose()
 			}
 		}? {
 			match msg {
 				WsEvent::CreateStream(stream_type, host, port, channel) => {
-					let ret: Result<MuxStream, WispError> = async {
+					let ret: Result<MuxStream<W>, WispError> = async {
 						let stream_id = next_free_stream_id;
 						let next_stream_id = next_free_stream_id
 							.checked_add(1)
 							.ok_or(WispError::MaxStreamCountReached)?;
 
-						let (map_value, stream) =
-							self.create_new_stream(stream_id, stream_type).await?;
+						let (map_value, stream) = self.create_new_stream(stream_id, stream_type);
 
 						self.tx
 							.write_frame(
@@ -308,7 +343,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				WsEvent::Close(packet, channel) => {
 					if let Some(stream) = self.stream_map.remove(&packet.stream_id) {
 						if let PacketType::Close(close) = packet.packet_type {
-							self.close_stream(&stream, close);
+							Self::close_stream(&stream, close);
 						}
 						let _ = channel.send(self.tx.write_frame(packet.into()).await);
 					} else {
@@ -338,14 +373,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				}
 				WsEvent::WispMessage(packet, optional_frame) => {
 					if let Some(packet) = packet {
-						let should_break = match self.role {
-							Role::Server => {
-								self.server_handle_packet(packet, optional_frame).await?
-							}
-							Role::Client => {
-								self.client_handle_packet(packet, optional_frame).await?
-							}
-						};
+						let should_break = self.handle_packet(packet, optional_frame).await?;
 						if should_break {
 							break;
 						}
@@ -358,20 +386,16 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		Ok(())
 	}
 
-	fn handle_close_packet(
-		&mut self,
-		stream_id: u32,
-		inner_packet: ClosePacket,
-	) -> Result<bool, WispError> {
+	fn handle_close_packet(&mut self, stream_id: u32, inner_packet: ClosePacket) -> bool {
 		if stream_id == 0 {
-			return Ok(true);
+			return true;
 		}
 
 		if let Some(stream) = self.stream_map.remove(&stream_id) {
-			self.close_stream(&stream, inner_packet);
+			Self::close_stream(&stream, inner_packet);
 		}
 
-		Ok(false)
+		false
 	}
 
 	fn handle_data_packet(
@@ -379,7 +403,7 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 		stream_id: u32,
 		optional_frame: Option<Frame<'static>>,
 		data: Payload<'static>,
-	) -> Result<bool, WispError> {
+	) -> bool {
 		let mut data = BytesMut::from(data);
 
 		if let Some(stream) = self.stream_map.get(&stream_id) {
@@ -402,24 +426,36 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 			}
 		}
 
-		Ok(false)
+		false
+	}
+
+	async fn handle_packet(
+		&mut self,
+		packet: Packet<'static>,
+		optional_frame: Option<Frame<'static>>,
+	) -> Result<bool, WispError> {
+		use PacketType as P;
+		match packet.packet_type {
+			P::Data(data) => Ok(self.handle_data_packet(packet.stream_id, optional_frame, data)),
+			P::Close(inner_packet) => Ok(self.handle_close_packet(packet.stream_id, inner_packet)),
+
+			_ => match self.role {
+				Role::Server => self.server_handle_packet(packet, optional_frame).await,
+				Role::Client => self.client_handle_packet(&packet),
+			},
+		}
 	}
 
 	async fn server_handle_packet(
 		&mut self,
 		packet: Packet<'static>,
-		optional_frame: Option<Frame<'static>>,
+		_optional_frame: Option<Frame<'static>>,
 	) -> Result<bool, WispError> {
-		use PacketType::*;
+		use PacketType as P;
 		match packet.packet_type {
-			Continue(_) | Info(_) => Err(WispError::InvalidPacketType),
-			Data(data) => self.handle_data_packet(packet.stream_id, optional_frame, data),
-			Close(inner_packet) => self.handle_close_packet(packet.stream_id, inner_packet),
-
-			Connect(inner_packet) => {
-				let (map_value, stream) = self
-					.create_new_stream(packet.stream_id, inner_packet.stream_type)
-					.await?;
+			P::Connect(inner_packet) => {
+				let (map_value, stream) =
+					self.create_new_stream(packet.stream_id, inner_packet.stream_type);
 				self.server_tx
 					.send_async((inner_packet, stream))
 					.await
@@ -427,21 +463,17 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				self.stream_map.insert(packet.stream_id, map_value);
 				Ok(false)
 			}
+
+			// Continue | Info => invalid packet type
+			// Data | Close => specialcased
+			_ => Err(WispError::InvalidPacketType),
 		}
 	}
 
-	async fn client_handle_packet(
-		&mut self,
-		packet: Packet<'static>,
-		optional_frame: Option<Frame<'static>>,
-	) -> Result<bool, WispError> {
-		use PacketType::*;
+	fn client_handle_packet(&mut self, packet: &Packet<'static>) -> Result<bool, WispError> {
+		use PacketType as P;
 		match packet.packet_type {
-			Connect(_) | Info(_) => Err(WispError::InvalidPacketType),
-			Data(data) => self.handle_data_packet(packet.stream_id, optional_frame, data),
-			Close(inner_packet) => self.handle_close_packet(packet.stream_id, inner_packet),
-
-			Continue(inner_packet) => {
+			P::Continue(inner_packet) => {
 				if let Some(stream) = self.stream_map.get(&packet.stream_id) {
 					if stream.stream_type == StreamType::Tcp {
 						stream
@@ -452,6 +484,10 @@ impl<R: WebSocketRead + Send> MuxInner<R> {
 				}
 				Ok(false)
 			}
+
+			// Connect | Info => invalid packet type
+			// Data | Close => specialcased
+			_ => Err(WispError::InvalidPacketType),
 		}
 	}
 }

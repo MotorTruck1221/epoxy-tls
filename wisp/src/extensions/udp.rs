@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-	ws::{LockedWebSocketWrite, WebSocketRead},
+	ws::{DynWebSocketRead, LockingWebSocketWrite},
 	WispError,
 };
 
@@ -40,29 +40,24 @@ impl ProtocolExtension for UdpProtocolExtension {
 
 	async fn handle_handshake(
 		&mut self,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
 
 	async fn handle_packet(
 		&mut self,
+		_: u8,
 		_: Bytes,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
 
 	fn box_clone(&self) -> Box<dyn ProtocolExtension + Sync + Send> {
 		Box::new(Self)
-	}
-}
-
-impl From<UdpProtocolExtension> for AnyProtocolExtension {
-	fn from(value: UdpProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
 	}
 }
 

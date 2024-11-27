@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-	ws::{LockedWebSocketWrite, WebSocketRead},
+	ws::{DynWebSocketRead, LockingWebSocketWrite},
 	Role, WispError,
 };
 
@@ -48,17 +48,18 @@ impl ProtocolExtension for MotdProtocolExtension {
 
 	async fn handle_handshake(
 		&mut self,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
 
 	async fn handle_packet(
 		&mut self,
+		_: u8,
 		_: Bytes,
-		_: &mut dyn WebSocketRead,
-		_: &LockedWebSocketWrite,
+		_: &mut DynWebSocketRead,
+		_: &dyn LockingWebSocketWrite,
 	) -> Result<(), WispError> {
 		Ok(())
 	}
@@ -68,18 +69,24 @@ impl ProtocolExtension for MotdProtocolExtension {
 	}
 }
 
-impl From<MotdProtocolExtension> for AnyProtocolExtension {
-	fn from(value: MotdProtocolExtension) -> Self {
-		AnyProtocolExtension(Box::new(value))
-	}
-}
-
 /// MOTD protocol extension builder.
 pub enum MotdProtocolExtensionBuilder {
 	/// Server variant of MOTD protocol extension builder. Has the MOTD.
 	Server(String),
 	/// Client variant of MOTD protocol extension builder.
 	Client,
+}
+
+impl MotdProtocolExtensionBuilder {
+	/// Create a new server variant of the MOTD protocol extension builder.
+	pub fn new_server(motd: String) -> Self {
+		Self::Server(motd)
+	}
+
+	/// Create a new client variant of the MOTD protocol extension builder.
+	pub fn new_client() -> Self {
+		Self::Client
+	}
 }
 
 impl ProtocolExtensionBuilder for MotdProtocolExtensionBuilder {

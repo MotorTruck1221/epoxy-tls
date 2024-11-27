@@ -7,9 +7,10 @@ use tokio::{
 	select,
 };
 use uuid::Uuid;
-use wisp_mux::{ConnectPacket, StreamType};
+use wisp_mux::{ws::Payload, CloseReason, ConnectPacket, StreamType};
 
 use crate::{
+	handle::wisp::wispnet::route_wispnet,
 	stream::{ClientStream, ResolvedPacket, WebSocketFrame, WebSocketStreamWrapper},
 	CLIENTS, CONFIG,
 };
@@ -48,8 +49,27 @@ pub async fn handle_wsproxy(
 			.await;
 		return Ok(());
 	};
-	let connect = match resolved {
-		ResolvedPacket::Valid(x) => x,
+	let (stream, resolved_stream) = match resolved {
+		ResolvedPacket::Valid(connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = ClientStream::connect(connect).await else {
+				let _ = ws
+					.close(CloseCode::Error.into(), b"failed to connect to host")
+					.await;
+				return Ok(());
+			};
+			(stream, resolved)
+		}
+		ResolvedPacket::ValidWispnet(server, connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = route_wispnet(server, connect).await else {
+				let _ = ws
+					.close(CloseCode::Error.into(), b"failed to connect to host")
+					.await;
+				return Ok(());
+			};
+			(stream, resolved)
+		}
 		ResolvedPacket::NoResolvedAddrs => {
 			let _ = ws
 				.close(
@@ -74,15 +94,6 @@ pub async fn handle_wsproxy(
 		}
 	};
 
-	let resolved_stream = connect.clone();
-
-	let Ok(stream) = ClientStream::connect(connect).await else {
-		let _ = ws
-			.close(CloseCode::Error.into(), b"failed to connect to host")
-			.await;
-		return Ok(());
-	};
-
 	let uuid = Uuid::new_v4();
 
 	debug!(
@@ -90,11 +101,13 @@ pub async fn handle_wsproxy(
 		id, uuid, requested_stream, resolved_stream
 	);
 
-	CLIENTS
-		.get(&id)
-		.unwrap()
-		.0
-		.insert(uuid, (requested_stream, resolved_stream));
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client
+			.0
+			.lock()
+			.await
+			.insert(uuid, (requested_stream, resolved_stream.clone()));
+	}
 
 	match stream {
 		ClientStream::Tcp(stream) => {
@@ -171,6 +184,65 @@ pub async fn handle_wsproxy(
 				.close(CloseCode::Error.into(), b"twisp is not supported")
 				.await;
 		}
+		ClientStream::Wispnet(stream, mux_id) => {
+			if let Some(client) = CLIENTS.lock().await.get(&mux_id) {
+				client
+					.0
+					.lock()
+					.await
+					.insert(uuid, (resolved_stream.clone(), resolved_stream));
+			}
+
+			let ret: anyhow::Result<()> = async {
+				loop {
+					select! {
+						x = ws.read() => {
+							match x? {
+								WebSocketFrame::Data(data) => {
+									stream.write_payload(Payload::Bytes(data)).await?;
+								}
+								WebSocketFrame::Close => {
+									stream.close(CloseReason::Voluntary).await?;
+								}
+								WebSocketFrame::Ignore => {}
+							}
+						}
+						x = stream.read() => {
+							let Some(x) = x? else {
+								break;
+							};
+							ws.write(&x).await?;
+						}
+					}
+				}
+				Ok(())
+			}
+			.await;
+
+			if let Some(client) = CLIENTS.lock().await.get(&mux_id) {
+				client.0.lock().await.remove(&uuid);
+			}
+
+			match ret {
+				Ok(_) => {
+					let _ = ws.close(CloseCode::Normal.into(), b"").await;
+				}
+				Err(x) => {
+					let _ = ws
+						.close(CloseCode::Normal.into(), x.to_string().as_bytes())
+						.await;
+				}
+			}
+		}
+		ClientStream::NoResolvedAddrs => {
+			let _ = ws
+				.close(
+					CloseCode::Error.into(),
+					b"host did not resolve to any addrs",
+				)
+				.await;
+			return Ok(());
+		}
 		ClientStream::Blocked => {
 			let _ = ws.close(CloseCode::Error.into(), b"host is blocked").await;
 		}
@@ -183,6 +255,10 @@ pub async fn handle_wsproxy(
 		"wsproxy client id {:?} disconnected (stream uuid {:?})",
 		id, uuid
 	);
+
+	if let Some(client) = CLIENTS.lock().await.get(&id) {
+		client.0.lock().await.remove(&uuid);
+	}
 
 	Ok(())
 }
