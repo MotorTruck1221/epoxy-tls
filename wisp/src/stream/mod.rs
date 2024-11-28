@@ -30,7 +30,7 @@ pub struct MuxStreamRead<W: WebSocketWrite + 'static> {
 	role: Role,
 
 	tx: LockedWebSocketWrite<W>,
-	rx: mpsc::Receiver<Bytes>,
+	rx: mpsc::Receiver<Payload<'static>>,
 
 	is_closed: Arc<AtomicBool>,
 	is_closed_event: Arc<Event>,
@@ -44,7 +44,7 @@ pub struct MuxStreamRead<W: WebSocketWrite + 'static> {
 
 impl<W: WebSocketWrite + 'static> MuxStreamRead<W> {
 	/// Read an event from the stream.
-	pub async fn read(&self) -> Result<Option<Bytes>, WispError> {
+	pub async fn read(&self) -> Result<Option<Payload<'static>>, WispError> {
 		if self.rx.is_empty() && self.is_closed.load(Ordering::Acquire) {
 			return Ok(None);
 		}
@@ -72,7 +72,7 @@ impl<W: WebSocketWrite + 'static> MuxStreamRead<W> {
 
 	pub(crate) fn into_inner_stream(
 		self,
-	) -> Pin<Box<dyn Stream<Item = Result<Bytes, WispError>> + Send>> {
+	) -> Pin<Box<dyn Stream<Item = Result<Payload<'static>, WispError>> + Send>> {
 		Box::pin(stream::unfold(self, |rx| async move {
 			Some((rx.read().await.transpose()?, rx))
 		}))
@@ -271,7 +271,7 @@ impl<W: WebSocketWrite + 'static> MuxStream<W> {
 		stream_id: u32,
 		role: Role,
 		stream_type: StreamType,
-		rx: mpsc::Receiver<Bytes>,
+		rx: mpsc::Receiver<Payload<'static>>,
 		mux_tx: mpsc::Sender<WsEvent<W>>,
 		tx: LockedWebSocketWrite<W>,
 		is_closed: Arc<AtomicBool>,
@@ -320,7 +320,7 @@ impl<W: WebSocketWrite + 'static> MuxStream<W> {
 	}
 
 	/// Read an event from the stream.
-	pub async fn read(&self) -> Result<Option<Bytes>, WispError> {
+	pub async fn read(&self) -> Result<Option<Payload<'static>>, WispError> {
 		self.rx.read().await
 	}
 

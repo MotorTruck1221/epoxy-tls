@@ -7,7 +7,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::{
 	ready, stream::IntoAsyncRead, task::noop_waker_ref, AsyncBufRead, AsyncRead, AsyncWrite, Sink,
 	Stream, TryStreamExt,
@@ -47,7 +47,7 @@ impl MuxStreamIo {
 }
 
 impl Stream for MuxStreamIo {
-	type Item = Result<Bytes, std::io::Error>;
+	type Item = Result<Payload<'static>, std::io::Error>;
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		self.project().rx.poll_next(cx)
 	}
@@ -73,7 +73,7 @@ pin_project! {
 	/// Read side of a multiplexor stream that implements futures `Stream`.
 	pub struct MuxStreamIoStream {
 		#[pin]
-		pub(crate) rx: Pin<Box<dyn Stream<Item = Result<Bytes, WispError>> + Send>>,
+		pub(crate) rx: Pin<Box<dyn Stream<Item = Result<Payload<'static>, WispError>> + Send>>,
 		pub(crate) is_closed: Arc<AtomicBool>,
 		pub(crate) close_reason: Arc<AtomicCloseReason>,
 	}
@@ -96,7 +96,7 @@ impl MuxStreamIoStream {
 }
 
 impl Stream for MuxStreamIoStream {
-	type Item = Result<Bytes, std::io::Error>;
+	type Item = Result<Payload<'static>, std::io::Error>;
 	fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		self.project()
 			.rx

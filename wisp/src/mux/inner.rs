@@ -9,7 +9,7 @@ use crate::{
 	AtomicCloseReason, ClosePacket, CloseReason, ConnectPacket, MuxStream, Packet, PacketType,
 	Role, StreamType, WispError,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use event_listener::Event;
 use flume as mpsc;
 use futures::{channel::oneshot, select, stream::unfold, FutureExt, StreamExt};
@@ -31,7 +31,7 @@ pub(crate) enum WsEvent<W: WebSocketWrite + 'static> {
 }
 
 struct MuxMapValue {
-	stream: mpsc::Sender<Bytes>,
+	stream: mpsc::Sender<Payload<'static>>,
 	stream_type: StreamType,
 
 	should_flow_control: bool,
@@ -414,7 +414,7 @@ impl<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> MuxInner<R, W> {
 					data.extend_from_slice(&extra_frame.payload);
 				}
 			}
-			let _ = stream.stream.try_send(data.freeze());
+			let _ = stream.stream.try_send(Payload::Bytes(data));
 			if self.role == Role::Server && stream.should_flow_control {
 				stream.flow_control.store(
 					stream

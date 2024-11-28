@@ -7,7 +7,7 @@
 use std::{future::Future, ops::Deref, pin::Pin, sync::Arc};
 
 use crate::WispError;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use futures::{lock::Mutex, TryFutureExt};
 
 /// Payload of the websocket frame.
@@ -51,6 +51,15 @@ impl From<Payload<'_>> for BytesMut {
 	}
 }
 
+impl From<Payload<'static>> for Bytes {
+	fn from(value: Payload<'static>) -> Self {
+		match value {
+			Payload::Bytes(x) => x.freeze(),
+			Payload::Borrowed(x) => x.into(),
+		}
+	}
+}
+
 impl Deref for Payload<'_> {
 	type Target = [u8];
 	fn deref(&self) -> &Self::Target {
@@ -58,6 +67,12 @@ impl Deref for Payload<'_> {
 			Self::Bytes(x) => x,
 			Self::Borrowed(x) => x,
 		}
+	}
+}
+
+impl AsRef<[u8]> for Payload<'_> {
+	fn as_ref(&self) -> &[u8] {
+		self
 	}
 }
 
