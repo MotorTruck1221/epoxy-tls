@@ -65,7 +65,7 @@ pub enum WispError {
 	#[error("Unfinished websocket frame")]
 	WsFrameNotFinished,
 	/// Error specific to the websocket implementation.
-	#[error("Websocket implementation error:")]
+	#[error("Websocket implementation error: {0:?}")]
 	WsImplError(Box<dyn std::error::Error + Sync + Send>),
 	/// The websocket implementation socket closed.
 	#[error("Websocket implementation error: socket closed")]
