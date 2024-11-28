@@ -2,11 +2,11 @@ use std::{fmt::Display, future::Future, io::Cursor};
 
 use anyhow::Context;
 use bytes::Bytes;
-use fastwebsockets::{upgrade::UpgradeFut, FragmentCollector, WebSocketRead, WebSocketWrite};
+use fastwebsockets::{FragmentCollector, Role, WebSocket, WebSocketRead, WebSocketWrite};
 use http_body_util::Full;
 use hyper::{
 	body::Incoming, header::SEC_WEBSOCKET_PROTOCOL, server::conn::http1::Builder,
-	service::service_fn, HeaderMap, Request, Response, StatusCode,
+	service::service_fn, upgrade::OnUpgrade, HeaderMap, Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
 use log::{debug, error, trace};
@@ -21,6 +21,7 @@ use crate::{
 	generate_stats,
 	listener::{ServerStream, ServerStreamExt, ServerStreamRead, ServerStreamWrite},
 	stream::WebSocketStreamWrapper,
+	upgrade::{is_upgrade_request, upgrade},
 	util_chain::{chain, Chain},
 	CONFIG,
 };
@@ -55,7 +56,7 @@ impl Display for ServerRouteResult {
 		match self {
 			Self::Wisp { .. } => write!(f, "Wisp"),
 			Self::Wispnet { .. } => write!(f, "Wispnet"),
-			Self::WsProxy { path, udp, .. } => write!(f, "WsProxy path {:?} udp {:?}", path, udp),
+			Self::WsProxy { path, udp, .. } => write!(f, "WsProxy path {path:?} udp {udp:?}"),
 		}
 	}
 }
@@ -88,7 +89,7 @@ fn get_header(headers: &HeaderMap, header: &str) -> Option<String> {
 	headers
 		.get(header)
 		.and_then(|x| x.to_str().ok())
-		.map(|x| x.to_string())
+		.map(ToString::to_string)
 }
 
 enum HttpUpgradeResult {
@@ -108,28 +109,25 @@ async fn ws_upgrade<F, R>(
 	callback: F,
 ) -> anyhow::Result<Response<Body>>
 where
-	F: FnOnce(UpgradeFut, HttpUpgradeResult, Option<String>) -> R + Send + 'static,
+	F: FnOnce(OnUpgrade, HttpUpgradeResult, Option<String>) -> R + Send + 'static,
 	R: Future<Output = anyhow::Result<()>> + Send,
 {
-	let is_upgrade = fastwebsockets::upgrade::is_upgrade_request(&req);
+	let is_upgrade = is_upgrade_request(&req);
 
 	if !is_upgrade {
 		if let Some(stats_endpoint) = stats_endpoint {
 			if req.uri().path() == stats_endpoint {
 				return send_stats().await;
-			} else {
-				debug!("sent non_ws_response to http client");
-				return non_ws_resp();
 			}
-		} else {
-			debug!("sent non_ws_response to http client");
-			return non_ws_resp();
 		}
+
+		debug!("sent non_ws_response to http client");
+		return non_ws_resp();
 	}
 
 	trace!("recieved request {:?}", req);
 
-	let (resp, fut) = fastwebsockets::upgrade::upgrade(&mut req)?;
+	let (resp, fut) = upgrade(&mut req)?;
 	// replace body of Empty<Bytes> with Full<Bytes>
 	let mut resp = Response::from_parts(resp.into_parts().0, Body::new(Bytes::new()));
 
@@ -145,7 +143,8 @@ where
 
 	if req_path.ends_with(&(CONFIG.wisp.prefix.clone() + "/")) {
 		let has_ws_protocol = ws_protocol.is_some();
-		let is_wispnet = CONFIG.wisp.has_wispnet() && req.uri().query().unwrap_or_default() == "net";
+		let is_wispnet =
+			CONFIG.wisp.has_wispnet() && req.uri().query().unwrap_or_default() == "net";
 		tokio::spawn(async move {
 			if let Err(err) = (callback)(
 				fut,
@@ -215,7 +214,10 @@ pub async fn route(
 							req,
 							stats_endpoint.clone(),
 							|fut, res, maybe_ip| async move {
-								let mut ws = fut.await.context("failed to await upgrade future")?;
+								let ws = fut.await.context("failed to await upgrade future")?;
+
+								let mut ws =
+									WebSocket::after_handshake(TokioIo::new(ws), Role::Server);
 								ws.set_max_message_size(CONFIG.server.max_message_size);
 								ws.set_auto_pong(false);
 
@@ -250,7 +252,7 @@ pub async fn route(
 											}
 										};
 
-										(callback)(result, maybe_ip)
+										(callback)(result, maybe_ip);
 									}
 									HttpUpgradeResult::WsProxy { path, udp } => {
 										let ws = WebSocketStreamWrapper(FragmentCollector::new(ws));

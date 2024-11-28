@@ -39,6 +39,8 @@ mod stats;
 mod stream;
 #[doc(hidden)]
 mod util_chain;
+#[doc(hidden)]
+mod upgrade;
 
 #[doc(hidden)]
 type Client = (Mutex<HashMap<Uuid, (ConnectPacket, ConnectPacket)>>, String);
