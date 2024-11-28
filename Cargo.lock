@@ -1228,7 +1228,7 @@ dependencies = [
 [[package]]
 name = "hyper-util-wasm"
 version = "0.1.7"
-source = "git+https://github.com/r58Playz/hyper-util-wasm?branch=opinionated#c582f05daa6529a75f6838a26ebf29ff09f62921"
+source = "git+https://github.com/r58Playz/hyper-util-wasm?rev=07117dd90174688341c27df2fdeb023c71015e4a#07117dd90174688341c27df2fdeb023c71015e4a"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1237,8 +1237,6 @@ dependencies = [
  "http-body",
  "hyper",
  "pin-project-lite",
- "tower 0.4.13",
- "tower-service",
  "tracing",
  "wasmtimer",
 ]
