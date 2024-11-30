@@ -17,12 +17,12 @@ fn format_stream_type(stream_type: StreamType) -> &'static str {
 
 #[derive(Serialize)]
 struct MemoryStats {
-	active: f64,
-	allocated: f64,
-	mapped: f64,
-	metadata: f64,
-	resident: f64,
-	retained: f64,
+	active: usize,
+	allocated: usize,
+	mapped: usize,
+	metadata: usize,
+	resident: usize,
+	retained: usize,
 }
 
 #[derive(Serialize)]
@@ -66,12 +66,12 @@ pub async fn generate_stats() -> anyhow::Result<String> {
 	tikv_jemalloc_ctl::epoch::advance()?;
 
 	let memory = MemoryStats {
-		active: active::read()? as f64 / (1024 * 1024) as f64,
-		allocated: allocated::read()? as f64 / (1024 * 1024) as f64,
-		mapped: mapped::read()? as f64 / (1024 * 1024) as f64,
-		metadata: metadata::read()? as f64 / (1024 * 1024) as f64,
-		resident: resident::read()? as f64 / (1024 * 1024) as f64,
-		retained: retained::read()? as f64 / (1024 * 1024) as f64,
+		active: active::read()?,
+		allocated: allocated::read()?,
+		mapped: mapped::read()?,
+		metadata: metadata::read()?,
+		resident: resident::read()?,
+		retained: retained::read()?,
 	};
 
 	let clients_locked = CLIENTS.lock().await;

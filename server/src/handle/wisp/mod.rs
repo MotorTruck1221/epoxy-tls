@@ -83,6 +83,165 @@ async fn copy_write_fast(
 	}
 }
 
+async fn resolve_stream(
+	connect: ConnectPacket,
+	muxstream: &MuxStream<WispStreamWrite>,
+) -> Option<(ConnectPacket, ConnectPacket, ClientStream)> {
+	let requested_stream = connect.clone();
+
+	let Ok(resolved) = ClientStream::resolve(connect).await else {
+		let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+		return None;
+	};
+	let (stream, resolved_stream) = match resolved {
+		ResolvedPacket::Valid(connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = ClientStream::connect(connect).await else {
+				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+				return None;
+			};
+			(stream, resolved)
+		}
+		ResolvedPacket::ValidWispnet(server, connect) => {
+			let resolved = connect.clone();
+			let Ok(stream) = route_wispnet(server, connect).await else {
+				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+				return None;
+			};
+			(stream, resolved)
+		}
+		ResolvedPacket::NoResolvedAddrs => {
+			let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+			return None;
+		}
+		ResolvedPacket::Blocked => {
+			let _ = muxstream
+				.close(CloseReason::ServerStreamBlockedAddress)
+				.await;
+			return None;
+		}
+		ResolvedPacket::Invalid => {
+			let _ = muxstream.close(CloseReason::ServerStreamInvalidInfo).await;
+			return None;
+		}
+	};
+
+	Some((requested_stream, resolved_stream, stream))
+}
+
+async fn forward_stream(
+	muxstream: MuxStream<WispStreamWrite>,
+	stream: ClientStream,
+	resolved_stream: ConnectPacket,
+	uuid: Uuid,
+	#[cfg(feature = "twisp")] twisp_map: twisp::TwispMap,
+	#[cfg(feature = "speed-limit")] read_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
+	#[cfg(feature = "speed-limit")] write_limit: async_speed_limit::Limiter<
+		async_speed_limit::clock::StandardClock,
+	>,
+) {
+	match stream {
+		ClientStream::Tcp(stream) => {
+			let closer = muxstream.get_close_handle();
+
+			let ret: anyhow::Result<()> = async {
+				let (muxread, muxwrite) = muxstream.into_split();
+				let muxread = muxread.into_stream().into_asyncread();
+				let (tcpread, tcpwrite) = stream.into_split();
+				select! {
+					x = copy_read_fast(muxread, tcpwrite, #[cfg(feature = "speed-limit")] write_limit) => x?,
+					x = copy_write_fast(muxwrite, tcpread, #[cfg(feature = "speed-limit")] read_limit) => x?,
+				}
+				Ok(())
+			}
+			.await;
+
+			match ret {
+				Ok(()) => {
+					let _ = closer.close(CloseReason::Voluntary).await;
+				}
+				Err(_) => {
+					let _ = closer.close(CloseReason::Unexpected).await;
+				}
+			}
+		}
+		ClientStream::Udp(stream) => {
+			let closer = muxstream.get_close_handle();
+
+			let ret: anyhow::Result<()> = async move {
+				let mut data = vec![0u8; 65507];
+				loop {
+					select! {
+						size = stream.recv(&mut data) => {
+							let size = size?;
+							muxstream.write(&data[..size]).await?;
+						}
+						data = muxstream.read() => {
+							if let Some(data) = data? {
+								stream.send(&data).await?;
+							} else {
+								break Ok(());
+							}
+						}
+					}
+				}
+			}
+			.await;
+
+			match ret {
+				Ok(()) => {
+					let _ = closer.close(CloseReason::Voluntary).await;
+				}
+				Err(_) => {
+					let _ = closer.close(CloseReason::Unexpected).await;
+				}
+			}
+		}
+		#[cfg(feature = "twisp")]
+		ClientStream::Pty(cmd, pty) => {
+			let closer = muxstream.get_close_handle();
+			let id = muxstream.stream_id;
+			let (mut rx, mut tx) = muxstream.into_io().into_asyncrw().into_split();
+
+			match twisp::handle_twisp(id, &mut rx, &mut tx, twisp_map.clone(), pty, cmd).await {
+				Ok(()) => {
+					let _ = closer.close(CloseReason::Voluntary).await;
+				}
+				Err(_) => {
+					let _ = closer.close(CloseReason::Unexpected).await;
+				}
+			}
+		}
+		ClientStream::Wispnet(stream, mux_id) => {
+			Box::pin(wispnet::handle_stream(
+				muxstream,
+				stream,
+				mux_id,
+				uuid,
+				resolved_stream,
+				#[cfg(feature = "speed-limit")]
+				read_limit,
+				#[cfg(feature = "speed-limit")]
+				write_limit,
+			))
+			.await;
+		}
+		ClientStream::NoResolvedAddrs => {
+			let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+		}
+		ClientStream::Invalid => {
+			let _ = muxstream.close(CloseReason::ServerStreamInvalidInfo).await;
+		}
+		ClientStream::Blocked => {
+			let _ = muxstream
+				.close(CloseReason::ServerStreamBlockedAddress)
+				.await;
+		}
+	};
+}
+
 async fn handle_stream(
 	connect: ConnectPacket,
 	muxstream: MuxStream<WispStreamWrite>,
@@ -96,43 +255,11 @@ async fn handle_stream(
 		async_speed_limit::clock::StandardClock,
 	>,
 ) {
-	let requested_stream = connect.clone();
-
-	let Ok(resolved) = ClientStream::resolve(connect).await else {
-		let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
+	let Some((requested_stream, resolved_stream, stream)) =
+		resolve_stream(connect, &muxstream).await
+	else {
+		// muxstream was closed
 		return;
-	};
-	let (stream, resolved_stream) = match resolved {
-		ResolvedPacket::Valid(connect) => {
-			let resolved = connect.clone();
-			let Ok(stream) = ClientStream::connect(connect).await else {
-				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
-				return;
-			};
-			(stream, resolved)
-		}
-		ResolvedPacket::ValidWispnet(server, connect) => {
-			let resolved = connect.clone();
-			let Ok(stream) = route_wispnet(server, connect).await else {
-				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
-				return;
-			};
-			(stream, resolved)
-		}
-		ResolvedPacket::NoResolvedAddrs => {
-			let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
-			return;
-		}
-		ResolvedPacket::Blocked => {
-			let _ = muxstream
-				.close(CloseReason::ServerStreamBlockedAddress)
-				.await;
-			return;
-		}
-		ResolvedPacket::Invalid => {
-			let _ = muxstream.close(CloseReason::ServerStreamInvalidInfo).await;
-			return;
-		}
 	};
 
 	let uuid = Uuid::new_v4();
@@ -150,106 +277,18 @@ async fn handle_stream(
 			.insert(uuid, (requested_stream, resolved_stream.clone()));
 	}
 
-	let forward_fut = async {
-		match stream {
-			ClientStream::Tcp(stream) => {
-				let closer = muxstream.get_close_handle();
-
-				let ret: anyhow::Result<()> = async {
-					let (muxread, muxwrite) = muxstream.into_split();
-					let muxread = muxread.into_stream().into_asyncread();
-					let (tcpread, tcpwrite) = stream.into_split();
-					select! {
-						x = copy_read_fast(muxread, tcpwrite, #[cfg(feature = "speed-limit")] write_limit) => x?,
-						x = copy_write_fast(muxwrite, tcpread, #[cfg(feature = "speed-limit")] read_limit) => x?,
-					}
-					Ok(())
-				}
-				.await;
-
-				match ret {
-					Ok(()) => {
-						let _ = closer.close(CloseReason::Voluntary).await;
-					}
-					Err(_) => {
-						let _ = closer.close(CloseReason::Unexpected).await;
-					}
-				}
-			}
-			ClientStream::Udp(stream) => {
-				let closer = muxstream.get_close_handle();
-
-				let ret: anyhow::Result<()> = async move {
-					let mut data = vec![0u8; 65507];
-					loop {
-						select! {
-							size = stream.recv(&mut data) => {
-								let size = size?;
-								muxstream.write(&data[..size]).await?;
-							}
-							data = muxstream.read() => {
-								if let Some(data) = data? {
-									stream.send(&data).await?;
-								} else {
-									break Ok(());
-								}
-							}
-						}
-					}
-				}
-				.await;
-
-				match ret {
-					Ok(()) => {
-						let _ = closer.close(CloseReason::Voluntary).await;
-					}
-					Err(_) => {
-						let _ = closer.close(CloseReason::Unexpected).await;
-					}
-				}
-			}
-			#[cfg(feature = "twisp")]
-			ClientStream::Pty(cmd, pty) => {
-				let closer = muxstream.get_close_handle();
-				let id = muxstream.stream_id;
-				let (mut rx, mut tx) = muxstream.into_io().into_asyncrw().into_split();
-
-				match twisp::handle_twisp(id, &mut rx, &mut tx, twisp_map.clone(), pty, cmd).await {
-					Ok(()) => {
-						let _ = closer.close(CloseReason::Voluntary).await;
-					}
-					Err(_) => {
-						let _ = closer.close(CloseReason::Unexpected).await;
-					}
-				}
-			}
-			ClientStream::Wispnet(stream, mux_id) => {
-				wispnet::handle_stream(
-					muxstream,
-					stream,
-					mux_id,
-					uuid,
-					resolved_stream,
-					#[cfg(feature = "speed-limit")]
-					read_limit,
-					#[cfg(feature = "speed-limit")]
-					write_limit,
-				)
-				.await;
-			}
-			ClientStream::NoResolvedAddrs => {
-				let _ = muxstream.close(CloseReason::ServerStreamUnreachable).await;
-			}
-			ClientStream::Invalid => {
-				let _ = muxstream.close(CloseReason::ServerStreamInvalidInfo).await;
-			}
-			ClientStream::Blocked => {
-				let _ = muxstream
-					.close(CloseReason::ServerStreamBlockedAddress)
-					.await;
-			}
-		};
-	};
+	let forward_fut = forward_stream(
+		muxstream,
+		stream,
+		resolved_stream,
+		uuid,
+		#[cfg(feature = "twisp")]
+		twisp_map,
+		#[cfg(feature = "speed-limit")]
+		read_limit,
+		#[cfg(feature = "speed-limit")]
+		write_limit,
+	);
 
 	select! {
 		x = forward_fut => x,
@@ -295,15 +334,17 @@ pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow:
 		.clock(async_speed_limit::clock::StandardClock)
 		.build();
 
-	let (mux, fut) = ServerMux::create(
-		read,
-		write,
-		buffer_size,
-		if is_v2 { extensions } else { None },
+	let (mux, fut) = Box::pin(
+		Box::pin(ServerMux::create(
+			read,
+			write,
+			buffer_size,
+			if is_v2 { extensions } else { None },
+		))
+		.await
+		.context("failed to create server multiplexor")?
+		.with_required_extensions(&required_extensions),
 	)
-	.await
-	.context("failed to create server multiplexor")?
-	.with_required_extensions(&required_extensions)
 	.await?;
 	let mux = Arc::new(mux);
 
@@ -336,7 +377,7 @@ pub async fn handle_wisp(stream: WispResult, is_v2: bool, id: String) -> anyhow:
 			trace!("sent ping to wisp client id {:?}", ping_id);
 			select! {
 				_ = interval.tick() => (),
-				_ = ping_event.listen() => break,
+				() = ping_event.listen() => break,
 			};
 		}
 	});

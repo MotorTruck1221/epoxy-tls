@@ -1,4 +1,5 @@
 // taken from tokio io util
+#![allow(clippy::pedantic, clippy::all)]
 
 use std::{
 	fmt, io,

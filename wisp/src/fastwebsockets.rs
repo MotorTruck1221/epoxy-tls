@@ -1,6 +1,4 @@
-//! WebSocketRead + WebSocketWrite implementation for the fastwebsockets library.
-
-use std::ops::Deref;
+//! `WebSocketRead` + `WebSocketWrite` implementation for the fastwebsockets library.
 
 use bytes::BytesMut;
 use fastwebsockets::{
@@ -14,7 +12,7 @@ use crate::{ws::LockingWebSocketWrite, WispError};
 fn match_payload(payload: Payload<'_>) -> crate::ws::Payload<'_> {
 	match payload {
 		Payload::Bytes(x) => crate::ws::Payload::Bytes(x),
-		Payload::Owned(x) => crate::ws::Payload::Bytes(BytesMut::from(x.deref())),
+		Payload::Owned(x) => crate::ws::Payload::Bytes(BytesMut::from(&*x)),
 		Payload::BorrowedMut(x) => crate::ws::Payload::Borrowed(&*x),
 		Payload::Borrowed(x) => crate::ws::Payload::Borrowed(x),
 	}
@@ -38,16 +36,16 @@ fn payload_to_bytesmut(payload: Payload<'_>) -> BytesMut {
 
 impl From<OpCode> for crate::ws::OpCode {
 	fn from(opcode: OpCode) -> Self {
-		use OpCode::*;
+		use OpCode as O;
 		match opcode {
-			Continuation => {
+			O::Continuation => {
 				unreachable!("continuation should never be recieved when using a fragmentcollector")
 			}
-			Text => Self::Text,
-			Binary => Self::Binary,
-			Close => Self::Close,
-			Ping => Self::Ping,
-			Pong => Self::Pong,
+			O::Text => Self::Text,
+			O::Binary => Self::Binary,
+			O::Close => Self::Close,
+			O::Ping => Self::Ping,
+			O::Pong => Self::Pong,
 		}
 	}
 }
@@ -64,14 +62,14 @@ impl<'a> From<Frame<'a>> for crate::ws::Frame<'a> {
 
 impl<'a> From<crate::ws::Frame<'a>> for Frame<'a> {
 	fn from(frame: crate::ws::Frame<'a>) -> Self {
-		use crate::ws::OpCode::*;
+		use crate::ws::OpCode as O;
 		let payload = match_payload_reverse(frame.payload);
 		match frame.opcode {
-			Text => Self::text(payload),
-			Binary => Self::binary(payload),
-			Close => Self::close_raw(payload),
-			Ping => Self::new(true, OpCode::Ping, None, payload),
-			Pong => Self::pong(payload),
+			O::Text => Self::text(payload),
+			O::Binary => Self::binary(payload),
+			O::Close => Self::close_raw(payload),
+			O::Ping => Self::new(true, OpCode::Ping, None, payload),
+			O::Pong => Self::pong(payload),
 		}
 	}
 }
@@ -196,7 +194,7 @@ impl<S: AsyncRead + Unpin + Send> crate::ws::WebSocketRead for WebSocketRead<S> 
 
 impl<S: AsyncWrite + Unpin + Send> crate::ws::WebSocketWrite for WebSocketWrite<S> {
 	async fn wisp_write_frame(&mut self, frame: crate::ws::Frame<'_>) -> Result<(), WispError> {
-		self.write_frame(frame.into()).await.map_err(|e| e.into())
+		self.write_frame(frame.into()).await.map_err(Into::into)
 	}
 
 	async fn wisp_write_split(
@@ -218,6 +216,6 @@ impl<S: AsyncWrite + Unpin + Send> crate::ws::WebSocketWrite for WebSocketWrite<
 	async fn wisp_close(&mut self) -> Result<(), WispError> {
 		self.write_frame(Frame::close(CloseCode::Normal.into(), b""))
 			.await
-			.map_err(|e| e.into())
+			.map_err(Into::into)
 	}
 }

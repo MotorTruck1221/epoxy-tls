@@ -50,7 +50,7 @@ pub enum ClientStream {
 }
 
 // taken from rust 1.82.0
-fn ipv4_is_global(addr: &Ipv4Addr) -> bool {
+fn ipv4_is_global(addr: Ipv4Addr) -> bool {
 	!(addr.octets()[0] == 0 // "This network"
             || addr.is_private()
             || (addr.octets()[0] == 100 && (addr.octets()[1] & 0b1100_0000 == 0b0100_0000)) // || addr.is_shared()
@@ -67,7 +67,7 @@ fn ipv4_is_global(addr: &Ipv4Addr) -> bool {
             || (addr.octets()[0] & 240 == 240) // || addr.is_reserved()
             || addr.is_broadcast())
 }
-fn ipv6_is_global(addr: &Ipv6Addr) -> bool {
+fn ipv6_is_global(addr: Ipv6Addr) -> bool {
 	!(
 		addr.is_unspecified()
             || addr.is_loopback()
@@ -90,7 +90,7 @@ fn ipv6_is_global(addr: &Ipv6Addr) -> bool {
                     || matches!(addr.segments(), [0x2001, 4, 0x112, _, _, _, _, _])
                     // ORCHIDv2 (`2001:20::/28`)
                     // Drone Remote ID Protocol Entity Tags (DETs) Prefix (`2001:30::/28`)`
-                    || matches!(addr.segments(), [0x2001, b, _, _, _, _, _, _] if b >= 0x20 && b <= 0x3F)
+                    || matches!(addr.segments(), [0x2001, b, _, _, _, _, _, _] if (0x20..=0x3F).contains(&b))
                 ))
             // 6to4 (`2002::/16`) – it's not explicitly documented as globally reachable,
             // IANA says N/A.
@@ -101,7 +101,7 @@ fn ipv6_is_global(addr: &Ipv6Addr) -> bool {
 		// || addr.is_unicast_link_local()
 	)
 }
-fn is_global(addr: &IpAddr) -> bool {
+fn is_global(addr: IpAddr) -> bool {
 	match addr {
 		IpAddr::V4(x) => ipv4_is_global(x),
 		IpAddr::V6(x) => ipv6_is_global(x),
@@ -137,9 +137,8 @@ impl ClientStream {
 				if let StreamType::Unknown(ty) = packet.stream_type {
 					if ty == crate::handle::wisp::twisp::STREAM_TYPE && CONFIG.stream.allow_twisp && CONFIG.wisp.wisp_v2 {
 						return Ok(ResolvedPacket::Valid(packet));
-					} else {
-						return Ok(ResolvedPacket::Invalid);
 					}
+					return Ok(ResolvedPacket::Invalid);
 				}
 			} else {
 				if matches!(packet.stream_type, StreamType::Unknown(_)) {
@@ -179,8 +178,8 @@ impl ClientStream {
 				return Ok(ResolvedPacket::Blocked);
 			}
 
-			if (is_global(&addr) && !CONFIG.stream.allow_global)
-				|| (!is_global(&addr) && !CONFIG.stream.allow_non_global)
+			if (is_global(addr) && !CONFIG.stream.allow_global)
+				|| (!is_global(addr) && !CONFIG.stream.allow_non_global)
 			{
 				return Ok(ResolvedPacket::Blocked);
 			}
@@ -216,9 +215,7 @@ impl ClientStream {
 			})
 			.next();
 
-		Ok(packet
-			.map(ResolvedPacket::Valid)
-			.unwrap_or(ResolvedPacket::NoResolvedAddrs))
+		Ok(packet.map_or(ResolvedPacket::NoResolvedAddrs, ResolvedPacket::Valid))
 	}
 
 	pub async fn connect(packet: ConnectPacket) -> anyhow::Result<Self> {
