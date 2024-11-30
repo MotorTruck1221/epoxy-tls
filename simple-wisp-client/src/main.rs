@@ -41,6 +41,9 @@ use wisp_mux::{
 	ClientMux, StreamType, WispError, WispV2Handshake,
 };
 
+#[global_allocator]
+static JEMALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Debug)]
 enum WispClientError {
 	InvalidUriScheme,
