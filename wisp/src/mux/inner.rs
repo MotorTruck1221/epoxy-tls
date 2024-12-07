@@ -1,7 +1,7 @@
-use std::sync::{
+use std::{collections::HashMap, sync::{
 	atomic::{AtomicBool, AtomicU32, Ordering},
 	Arc,
-};
+}};
 
 use crate::{
 	extensions::AnyProtocolExtension,
@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use event_listener::Event;
 use flume as mpsc;
 use futures::{channel::oneshot, select, stream::unfold, FutureExt, StreamExt};
-use nohash_hasher::IntMap;
+use rustc_hash::FxHashMap;
 
 pub(crate) enum WsEvent<W: WebSocketWrite + 'static> {
 	Close(Packet<'static>, oneshot::Sender<Result<(), WispError>>),
@@ -60,7 +60,7 @@ pub(crate) struct MuxInner<R: WebSocketRead + 'static, W: WebSocketWrite + 'stat
 	actor_tx: mpsc::Sender<WsEvent<W>>,
 	fut_exited: Arc<AtomicBool>,
 
-	stream_map: IntMap<u32, MuxMapValue>,
+	stream_map: FxHashMap<u32, MuxMapValue>,
 
 	buffer_size: u32,
 	target_buffer_size: u32,
@@ -122,7 +122,7 @@ impl<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> MuxInner<R, W> {
 
 					role: Role::Server,
 
-					stream_map: IntMap::default(),
+					stream_map: HashMap::default(),
 
 					server_tx,
 				},
@@ -162,7 +162,7 @@ impl<R: WebSocketRead + 'static, W: WebSocketWrite + 'static> MuxInner<R, W> {
 
 				role: Role::Client,
 
-				stream_map: IntMap::default(),
+				stream_map: HashMap::default(),
 
 				server_tx,
 			},
