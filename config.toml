@@ -1,0 +1,46 @@
+[server]
+bind = [
+    "tcp",
+    "0.0.0.0:4000",
+]
+transport = "websocket"
+resolve_ipv6 = false
+tcp_nodelay = false
+file_raw_mode = false
+use_real_ip_headers = false
+non_ws_response = "Server online!"
+max_message_size = 65536
+log_level = "INFO"
+runtime = "multithread"
+
+[wisp]
+allow_wsproxy = false
+buffer_size = 128
+prefix = ""
+wisp_v2 = false
+extensions = [
+    "udp",
+    "motd",
+]
+password_extension_required = false
+certificate_extension_required = false
+
+[stream]
+tcp_nodelay = false
+buffer_size = 16384
+allow_udp = true
+allow_wsproxy_udp = false
+dns_servers = []
+allow_direct_ip = true
+allow_loopback = true
+allow_multicast = true
+allow_global = true
+allow_non_global = true
+allow_tcp_hosts = []
+block_tcp_hosts = []
+allow_udp_hosts = []
+block_udp_hosts = []
+allow_hosts = []
+block_hosts = []
+allow_ports = []
+block_ports = []
