@@ -138,7 +138,7 @@ pub enum ProtocolExtensionAuth {
 
 #[doc(hidden)]
 fn default_motd() -> String {
-	format!("epoxy_server ({})", VERSION_STRING)
+	format!("epoxy_server ({VERSION_STRING})")
 }
 
 #[doc(hidden)]
@@ -196,7 +196,7 @@ pub struct StreamConfig {
 	pub allow_udp: bool,
 	/// Whether or not to enable nonstandard legacy wsproxy UDP streams.
 	pub allow_wsproxy_udp: bool,
-	/// Whether or not to allow TWisp streams.
+	/// Whether or not to allow `TWisp` streams.
 	#[cfg(feature = "twisp")]
 	pub allow_twisp: bool,
 
@@ -519,13 +519,13 @@ impl Config {
 	}
 
 	#[doc(hidden)]
-	pub fn de(string: String) -> anyhow::Result<Self> {
+	pub fn de(string: &str) -> anyhow::Result<Self> {
 		Ok(match CLI.format {
-			ConfigFormat::Json => serde_json::from_str(&string)?,
+			ConfigFormat::Json => serde_json::from_str(string)?,
 			#[cfg(feature = "toml")]
-			ConfigFormat::Toml => toml::from_str(&string)?,
+			ConfigFormat::Toml => toml::from_str(string)?,
 			#[cfg(feature = "yaml")]
-			ConfigFormat::Yaml => serde_yaml::from_str(&string)?,
+			ConfigFormat::Yaml => serde_yaml::from_str(string)?,
 		})
 	}
 }

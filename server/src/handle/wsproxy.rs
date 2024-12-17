@@ -15,6 +15,9 @@ use crate::{
 	CLIENTS, CONFIG,
 };
 
+// TODO rewrite this whole thing
+//      isn't even cancel safe i think
+#[allow(clippy::too_many_lines)]
 pub async fn handle_wsproxy(
 	mut ws: WebSocketStreamWrapper,
 	id: String,
@@ -26,7 +29,7 @@ pub async fn handle_wsproxy(
 		return Ok(());
 	}
 
-	let vec: Vec<&str> = path.split("/").last().unwrap().split(":").collect();
+	let vec: Vec<&str> = path.split('/').last().unwrap().split(':').collect();
 	let Ok(port) = FromStr::from_str(vec[1]) else {
 		let _ = ws.close(CloseCode::Error.into(), b"invalid port").await;
 		return Ok(());
@@ -137,7 +140,7 @@ pub async fn handle_wsproxy(
 			}
 			.await;
 			match ret {
-				Ok(_) => {
+				Ok(()) => {
 					let _ = ws.close(CloseCode::Normal.into(), b"").await;
 				}
 				Err(x) => {
@@ -168,7 +171,7 @@ pub async fn handle_wsproxy(
 			}
 			.await;
 			match ret {
-				Ok(_) => {
+				Ok(()) => {
 					let _ = ws.close(CloseCode::Normal.into(), b"").await;
 				}
 				Err(x) => {
@@ -224,7 +227,7 @@ pub async fn handle_wsproxy(
 			}
 
 			match ret {
-				Ok(_) => {
+				Ok(()) => {
 					let _ = ws.close(CloseCode::Normal.into(), b"").await;
 				}
 				Err(x) => {

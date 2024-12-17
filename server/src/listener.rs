@@ -188,7 +188,7 @@ impl<A: AsyncBufRead + Unpin, B: Unpin> AsyncBufRead for Duplex<A, B> {
 	}
 
 	fn consume(self: Pin<&mut Self>, amt: usize) {
-		Pin::new(&mut self.get_mut().0).consume(amt)
+		Pin::new(&mut self.get_mut().0).consume(amt);
 	}
 }
 
@@ -368,10 +368,10 @@ impl ServerListener {
 
 		Ok((
 			stream,
-			addr.as_pathname()
-				.and_then(|x| x.to_str())
-				.map(ToString::to_string)
-				.unwrap_or_else(|| Uuid::new_v4().to_string() + "-unix_socket"),
+			addr.as_pathname().and_then(|x| x.to_str()).map_or_else(
+				|| Uuid::new_v4().to_string() + "-unix_socket",
+				ToString::to_string,
+			),
 		))
 	}
 

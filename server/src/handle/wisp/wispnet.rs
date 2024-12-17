@@ -218,12 +218,14 @@ pub async fn handle_wispnet(stream: WispResult, id: String) -> Result<()> {
 
 	let extensions = vec![WispnetServerProtocolExtensionBuilder(net_id).into()];
 
-	let (mux, fut) = ClientMux::create(read, write, Some(WispV2Handshake::new(extensions)))
-		.await
-		.context("failed to create client multiplexor")?
-		.with_required_extensions(&[WispnetServerProtocolExtension::ID])
-		.await
-		.context("wispnet client did not have wispnet extension")?;
+	let (mux, fut) = Box::pin(
+		ClientMux::create(read, write, Some(WispV2Handshake::new(extensions)))
+			.await
+			.context("failed to create client multiplexor")?
+			.with_required_extensions(&[WispnetServerProtocolExtension::ID]),
+	)
+	.await
+	.context("wispnet client did not have wispnet extension")?;
 
 	let is_private = mux
 		.supported_extensions

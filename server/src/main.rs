@@ -6,7 +6,7 @@ use std::{collections::HashMap, fs::read_to_string, net::IpAddr};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use config::{validate_config_cache, Cli, Config, RuntimeFlavor};
+use config::{validate_config_cache, Cli, Config, RuntimeFlavor, StatsEndpoint};
 use handle::{handle_wisp, handle_wsproxy, wisp::wispnet::handle_wispnet};
 use hickory_resolver::{
 	config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
@@ -37,6 +37,8 @@ mod route;
 mod stats;
 #[doc(hidden)]
 mod stream;
+#[doc(hidden)]
+mod upgrade;
 #[doc(hidden)]
 mod util_chain;
 
@@ -75,7 +77,7 @@ lazy_static! {
 	pub static ref CONFIG: Config = {
 		if let Some(path) = &CLI.config {
 			Config::de(
-				read_to_string(path)
+				&read_to_string(path)
 					.context("failed to read config")
 					.unwrap(),
 			)
@@ -175,7 +177,7 @@ async fn async_main() -> Result<()> {
 		.server
 		.stats_endpoint
 		.as_ref()
-		.and_then(|x| x.get_bindaddr())
+		.and_then(StatsEndpoint::get_bindaddr)
 	{
 		info!("stats server listening on {:?}", bind_addr);
 		let mut stats_listener = ServerListener::new(&bind_addr).await.with_context(|| {
@@ -187,7 +189,7 @@ async fn async_main() -> Result<()> {
 				match stats_listener.accept().await {
 					Ok((stream, _)) => {
 						tokio::spawn(async move {
-							if let Err(e) = route_stats(stream).await {
+							if let Err(e) = Box::pin(route_stats(stream)).await {
 								error!("error while routing stats client: {:?}", e);
 							}
 						});
@@ -202,23 +204,27 @@ async fn async_main() -> Result<()> {
 		.server
 		.stats_endpoint
 		.as_ref()
-		.and_then(|x| x.get_endpoint());
+		.and_then(StatsEndpoint::get_endpoint);
 
 	loop {
 		let stats_endpoint = stats_endpoint.clone();
 		match listener.accept().await {
 			Ok((stream, client_id)) => {
 				tokio::spawn(async move {
-					let res = route::route(stream, stats_endpoint, move |stream, maybe_ip| {
-						let client_id = if let Some(ip) = maybe_ip {
-							format!("{} ({})", client_id, ip)
-						} else {
-							client_id
-						};
+					let res = Box::pin(route::route(
+						stream,
+						stats_endpoint,
+						move |stream, maybe_ip| {
+							let client_id = if let Some(ip) = maybe_ip {
+								format!("{client_id} ({ip})")
+							} else {
+								client_id
+							};
 
-						trace!("routed {:?}: {}", client_id, stream);
-						handle_stream(stream, client_id)
-					})
+							trace!("routed {:?}: {}", client_id, stream);
+							handle_stream(stream, client_id);
+						},
+					))
 					.await;
 
 					if let Err(e) = res {
@@ -236,16 +242,18 @@ fn handle_stream(stream: ServerRouteResult, id: String) {
 	tokio::spawn(async move {
 		CLIENTS.lock().await.insert(
 			id.clone(),
-			(Mutex::new(HashMap::new()), format!("{}", stream)),
+			(Mutex::new(HashMap::new()), format!("{stream}")),
 		);
 		let res = match stream {
 			ServerRouteResult::Wisp {
 				stream,
 				has_ws_protocol,
-			} => handle_wisp(stream, has_ws_protocol, id.clone()).await,
-			ServerRouteResult::Wispnet { stream } => handle_wispnet(stream, id.clone()).await,
+			} => Box::pin(handle_wisp(stream, has_ws_protocol, id.clone())).await,
+			ServerRouteResult::Wispnet { stream } => {
+				Box::pin(handle_wispnet(stream, id.clone())).await
+			}
 			ServerRouteResult::WsProxy { stream, path, udp } => {
-				handle_wsproxy(stream, id.clone(), path, udp).await
+				Box::pin(handle_wsproxy(stream, id.clone(), path, udp)).await
 			}
 		};
 		if let Err(e) = res {

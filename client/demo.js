@@ -19,6 +19,7 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 	const wisp_v1 = params.has("v1");
 	const wisp_udp = params.has("udp_extension");
 	const disable_certverif = params.has("disable_certverif");
+	const arraybuffer = params.has("arraybuffer");
 	console.log(
 		"%cWASM is significantly slower with DevTools open!",
 		"color:red;font-size:3rem;font-weight:bold"
@@ -332,7 +333,11 @@ import initEpoxy, { EpoxyClient, EpoxyClientOptions, EpoxyHandlers, info as epox
 			console.time();
 			let resp = await epoxy_client.fetch(test_url);
 			console.log(resp, resp.rawHeaders);
-			log(await resp.arrayBuffer());
+			if (arraybuffer) {
+				log(await resp.arrayBuffer());
+			} else {
+				log(await resp.text());
+			}
 			console.timeEnd();
 		}
 		log("done");

@@ -20,6 +20,7 @@ hyper = { version = "1.4.1", features = ["http1", "client"] }
 hyper-util = { version = "0.1.7", features = ["tokio"] }
 sha2 = "0.10.8"
 simple_moving_average = "1.0.2"
+tikv-jemallocator = "0.6.0"
 tokio = { version = "1.39.3", features = ["full"] }
 wisp-mux = { path = "../wisp", features = ["fastwebsockets"]}
 

@@ -50,7 +50,7 @@ pub fn iostream_from_asyncrw(asyncrw: ProviderAsyncRW, buffer_size: usize) -> Ep
 pub fn iostream_from_stream(stream: ProviderUnencryptedStream) -> EpoxyIoStream {
 	let (rx, tx) = stream.into_split();
 	create_iostream(
-		Box::pin(rx.map_err(EpoxyError::Io)),
+		Box::pin(rx.map_ok(Bytes::from).map_err(EpoxyError::Io)),
 		Box::pin(tx.sink_map_err(EpoxyError::Io)),
 	)
 }
